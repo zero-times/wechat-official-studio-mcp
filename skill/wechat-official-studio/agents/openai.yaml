@@ -1,0 +1,13 @@
+interface:
+  display_name: "微信公众号工作台"
+  short_description: "安全读取公众号数据、上传图片素材并保存经确认的文章草稿"
+  default_prompt: "Use $wechat-official-studio to review my WeChat Official Account data or safely prepare approved images and article drafts."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "wechat_official"
+      description: "Local WeChat Official Studio MCP server for authenticated reads and confirmed draft writes"
+
+policy:
+  allow_implicit_invocation: true
