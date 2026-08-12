@@ -12,12 +12,13 @@ test("accepts modern /s/article-id public URLs without sending a cookie", async 
   }) as typeof fetch;
   const client = new WechatClient(fetchImplementation);
 
-  const html = await client.getPublicArticle("https://mp.weixin.qq.com/s/article-id");
-  assert.equal(html, "<html>article</html>");
+  const result = await client.getPublicArticle("https://mp.weixin.qq.com/s/article-id");
+  assert.equal(result.html, "<html>article</html>");
+  assert.equal(result.accessMode, "anonymous");
   assert.equal(cookieHeader, null);
 });
 
-test("marks request timeouts as requiring a local cookie refresh check", async () => {
+test("does not blame the local cookie for an anonymous public request timeout", async () => {
   const fetchImplementation = (async () => {
     throw new DOMException("The operation timed out", "TimeoutError");
   }) as typeof fetch;
@@ -28,10 +29,109 @@ test("marks request timeouts as requiring a local cookie refresh check", async (
     (error: unknown) => {
       assert.ok(error instanceof WechatMcpError);
       assert.equal(error.code, "REQUEST_TIMEOUT");
-      assert.equal(error.requiresCookieRefresh, true);
+      assert.equal(error.requiresCookieRefresh, false);
       return true;
     },
   );
+});
+
+test("retries a challenged public article once after authentication preflight", async () => {
+  const previousCookie = process.env.WECHAT_OFFICIAL_COOKIE;
+  const previousToken = process.env.WECHAT_OFFICIAL_TOKEN;
+  process.env.WECHAT_OFFICIAL_COOKIE = `session=${"x".repeat(32)}`;
+  process.env.WECHAT_OFFICIAL_TOKEN = "987654";
+  const requests: Array<{ path: string; cookie: string | null }> = [];
+  try {
+    const client = new WechatClient((async (input, init) => {
+      const url = new URL(String(input));
+      const cookie = new Headers(init?.headers).get("cookie");
+      requests.push({ path: url.pathname, cookie });
+      if (url.pathname === "/cgi-bin/home") {
+        return new Response("<html>authenticated home</html>", { status: 200 });
+      }
+      if (!cookie) {
+        return new Response("", {
+          status: 302,
+          headers: { location: "/mp/wappoc_appmsgcaptcha?poc_token=test" },
+        });
+      }
+      return new Response("<html>article after authentication</html>", { status: 200 });
+    }) as typeof fetch);
+
+    const result = await client.getPublicArticle("https://mp.weixin.qq.com/s/article-id");
+    assert.equal(result.html, "<html>article after authentication</html>");
+    assert.equal(result.accessMode, "authenticated");
+    assert.deepEqual(requests.map((request) => request.path), [
+      "/s/article-id",
+      "/cgi-bin/home",
+      "/s/article-id",
+    ]);
+    assert.equal(requests[0]?.cookie, null);
+    assert.ok(requests[1]?.cookie);
+    assert.ok(requests[2]?.cookie);
+  } finally {
+    if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
+    else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;
+    if (previousToken === undefined) delete process.env.WECHAT_OFFICIAL_TOKEN;
+    else process.env.WECHAT_OFFICIAL_TOKEN = previousToken;
+  }
+});
+
+test("stops a challenged public article when authenticated fallback is disabled", async () => {
+  let requestCount = 0;
+  const client = new WechatClient((async () => {
+    requestCount += 1;
+    return new Response("<html><h2>环境异常</h2><p>完成验证后即可继续访问</p></html>", {
+      status: 200,
+    });
+  }) as typeof fetch);
+
+  await assert.rejects(
+    () => client.getPublicArticle("https://mp.weixin.qq.com/s/article-id", "never"),
+    (error: unknown) => {
+      assert.ok(error instanceof WechatMcpError);
+      assert.equal(error.code, "PUBLIC_ARTICLE_CHALLENGE");
+      assert.equal(error.requiresCookieRefresh, false);
+      assert.match(String(errorPayload(error).next_action), /own browser/);
+      return true;
+    },
+  );
+  assert.equal(requestCount, 1);
+});
+
+test("stops before authenticated article retry when the local session is expired", async () => {
+  const previousCookie = process.env.WECHAT_OFFICIAL_COOKIE;
+  const previousToken = process.env.WECHAT_OFFICIAL_TOKEN;
+  process.env.WECHAT_OFFICIAL_COOKIE = `session=${"x".repeat(32)}`;
+  process.env.WECHAT_OFFICIAL_TOKEN = "987654";
+  const requestedPaths: string[] = [];
+  try {
+    const client = new WechatClient((async (input) => {
+      const path = new URL(String(input)).pathname;
+      requestedPaths.push(path);
+      if (path === "/cgi-bin/home") {
+        return new Response("<html>登录超时，请重新登录</html>", { status: 200 });
+      }
+      return new Response("", {
+        status: 302,
+        headers: { location: "/mp/wappoc_appmsgcaptcha?poc_token=test" },
+      });
+    }) as typeof fetch);
+
+    await assert.rejects(
+      () => client.getPublicArticle("https://mp.weixin.qq.com/s/article-id"),
+      (error: unknown) =>
+        error instanceof WechatMcpError &&
+        error.code === "AUTH_EXPIRED" &&
+        error.requiresCookieRefresh,
+    );
+    assert.deepEqual(requestedPaths, ["/s/article-id", "/cgi-bin/home"]);
+  } finally {
+    if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
+    else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;
+    if (previousToken === undefined) delete process.env.WECHAT_OFFICIAL_TOKEN;
+    else process.env.WECHAT_OFFICIAL_TOKEN = previousToken;
+  }
 });
 
 test("marks write timeouts as ambiguous and never requests an automatic retry", async () => {
@@ -55,6 +155,63 @@ test("marks write timeouts as ambiguous and never requests an automatic retry", 
         return true;
       },
     );
+  } finally {
+    if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
+    else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;
+    if (previousToken === undefined) delete process.env.WECHAT_OFFICIAL_TOKEN;
+    else process.env.WECHAT_OFFICIAL_TOKEN = previousToken;
+  }
+});
+
+test("authentication preflight makes a real request even when a token is configured", async () => {
+  const previousCookie = process.env.WECHAT_OFFICIAL_COOKIE;
+  const previousToken = process.env.WECHAT_OFFICIAL_TOKEN;
+  process.env.WECHAT_OFFICIAL_COOKIE = `session=${"x".repeat(32)}`;
+  process.env.WECHAT_OFFICIAL_TOKEN = "987654";
+  const requestedPaths: string[] = [];
+  try {
+    const client = new WechatClient((async (input) => {
+      requestedPaths.push(new URL(String(input)).pathname);
+      return new Response("<html>authenticated home</html>", { status: 200 });
+    }) as typeof fetch);
+
+    await client.verifyAuthentication();
+    assert.deepEqual(requestedPaths, ["/cgi-bin/home"]);
+  } finally {
+    if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
+    else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;
+    if (previousToken === undefined) delete process.env.WECHAT_OFFICIAL_TOKEN;
+    else process.env.WECHAT_OFFICIAL_TOKEN = previousToken;
+  }
+});
+
+test("authentication preflight never trusts a previously verified cached token", async () => {
+  const previousCookie = process.env.WECHAT_OFFICIAL_COOKIE;
+  const previousToken = process.env.WECHAT_OFFICIAL_TOKEN;
+  process.env.WECHAT_OFFICIAL_COOKIE = `session=${"x".repeat(32)}`;
+  process.env.WECHAT_OFFICIAL_TOKEN = "987654";
+  let requestCount = 0;
+  try {
+    const client = new WechatClient((async () => {
+      requestCount += 1;
+      return new Response(
+        requestCount === 1 ? "<html>authenticated home</html>" : "<html>登录超时，请重新登录</html>",
+        { status: 200 },
+      );
+    }) as typeof fetch);
+
+    await client.verifyAuthentication();
+    await assert.rejects(
+      () => client.verifyAuthentication(),
+      (error: unknown) => {
+        assert.ok(error instanceof WechatMcpError);
+        assert.equal(error.code, "AUTH_EXPIRED");
+        assert.equal(error.requiresCookieRefresh, true);
+        assert.match(String(errorPayload(error).next_action), /Stop the current workflow/);
+        return true;
+      },
+    );
+    assert.equal(requestCount, 2);
   } finally {
     if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
     else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;

@@ -82,7 +82,7 @@ const server = new McpServer(
   { name: SERVER_NAME, version: SERVER_VERSION },
   {
     instructions:
-      "Access to the user's logged-in WeChat Official Account. Call wechat_official_check_auth before backend tools. Never ask for or echo cookie values. Upload and draft-save tools require confirm=true and never publish. A write timeout is ambiguous: inspect the material library or draft box and never retry automatically.",
+      "Access to the user's logged-in WeChat Official Account. Call wechat_official_check_auth before a workflow. Every authenticated backend tool also performs a fresh lightweight authentication preflight and stops before its requested operation if verification fails. Never ask for or echo cookie values. Upload and draft-save tools require confirm=true and never publish. A write timeout is ambiguous: inspect the material library or draft box and never retry automatically.",
   },
 );
 
@@ -102,8 +102,7 @@ server.registerTool(
   },
   async ({ response_format }) => {
     try {
-      const session = await client.getSession();
-      const html = await client.getText("/cgi-bin/home", { t: "home/index" });
+      const { session, homeHtml: html } = await client.verifyAuthentication();
       const account = parseAccountInfo(html);
       const data = {
         ok: true,
@@ -138,7 +137,7 @@ server.registerTool(
   },
   async ({ response_format }) => {
     try {
-      const html = await client.getText("/cgi-bin/home", { t: "home/index" });
+      const { homeHtml: html } = await client.verifyAuthentication();
       const account = parseAccountInfo(html);
       return formatResult(
         { ok: true, account },
@@ -183,6 +182,7 @@ server.registerTool(
   },
   async ({ query, limit, offset, response_format }) => {
     try {
+      await client.verifyAuthentication();
       const payload = await client.getJson("/cgi-bin/appmsgpublish", {
         sub: query ? "search" : "list",
         begin: offset,
@@ -223,11 +223,15 @@ server.registerTool(
   {
     title: "Read a public WeChat article",
     description:
-      "Extract title, account, author, date, summary, images, links, and readable text from one public mp.weixin.qq.com/s article URL. The backend cookie is not sent with this public request.",
+      "Extract title, account, author, date, summary, images, links, and readable text from one public mp.weixin.qq.com/s article URL. Defaults to an anonymous request, then performs an authentication preflight and retries once with the local backend Cookie only if WeChat returns an environment challenge.",
     inputSchema: z
       .object({
         url: z.string().url(),
         max_characters: z.number().int().min(1_000).max(MAX_RESPONSE_CHARACTERS).default(20_000),
+        authentication: z
+          .enum(["auto", "never", "required"])
+          .default("auto")
+          .describe("auto: anonymous first with one authenticated fallback; never: never send the backend Cookie; required: preflight and use the Cookie immediately"),
         response_format: responseFormatSchema,
       })
       .strict(),
@@ -238,9 +242,9 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ url, max_characters, response_format }) => {
+  async ({ url, max_characters, authentication, response_format }) => {
     try {
-      const html = await client.getPublicArticle(url);
+      const { html, accessMode } = await client.getPublicArticle(url, authentication);
       const article = parsePublicArticle(html, max_characters);
       const markdown = [
         `# ${article.title}`,
@@ -249,12 +253,17 @@ server.registerTool(
         article.author ? `- 作者：${article.author}` : undefined,
         article.published_at ? `- 发布时间：${article.published_at}` : undefined,
         article.description ? `- 摘要：${article.description}` : undefined,
+        `- 访问方式：${accessMode === "anonymous" ? "匿名公开页面" : "已验证本地会话回退"}`,
         "",
         article.content,
       ]
         .filter((value) => value !== undefined)
         .join("\n");
-      return formatResult({ ok: true, url, ...article }, markdown, response_format);
+      return formatResult(
+        { ok: true, url, access_mode: accessMode, ...article },
+        markdown,
+        response_format,
+      );
     } catch (error) {
       return toolError(error);
     }
@@ -287,6 +296,7 @@ server.registerTool(
   },
   async ({ begin_date, end_date, limit, offset, response_format }) => {
     try {
+      await client.verifyAuthentication();
       assertDateRange(begin_date, end_date);
       const buffer = await client.getReport("/misc/appmsganalysis", {
         action: "report",
@@ -324,6 +334,7 @@ server.registerTool(
   },
   async ({ begin_date, end_date, limit, offset, response_format }) => {
     try {
+      await client.verifyAuthentication();
       assertDateRange(begin_date, end_date);
       const buffer = await client.getReport("/misc/useranalysis", {
         download: 1,
@@ -501,6 +512,8 @@ server.registerTool(
     try {
       if (!confirm) return confirmError("wechat_official_upload_image");
 
+      await client.verifyAuthentication();
+
       const validated = validateImageFile(file_path);
 
       let result: unknown;
@@ -632,6 +645,8 @@ server.registerTool(
   async ({ articles, confirm, response_format }) => {
     try {
       if (!confirm) return confirmError("wechat_official_create_draft");
+
+      await client.verifyAuthentication();
 
       // Validate locally first
       const validation = validateDraftArticles(

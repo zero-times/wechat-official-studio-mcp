@@ -11,21 +11,24 @@ Use the `wechat_official` MCP server. Default to reads. Permit only the two supp
 
 1. Locate tools whose names start with `wechat_official_`.
 2. Call `wechat_official_check_auth` before any authenticated read or write.
+   Every authenticated backend tool also performs its own lightweight preflight check and stops before the requested operation if that check fails. Local draft validation is exempt. Public-article reads start anonymously but may perform the same preflight before one authenticated fallback.
 3. Never request, print, summarize, copy, or commit a Cookie, token, ticket, `.wechat-cookie`, or `.env` value.
 4. If the MCP is missing, explain that it must be built and registered, then ask the user to restart Codex or open a new task after enabling it.
 
-For `AUTH_REQUIRED`, `AUTH_EXPIRED`, or a read-side `REQUEST_TIMEOUT`, read [references/cookie-setup.md](references/cookie-setup.md), give the local reset steps, and stop authenticated calls. Do not retry more than once. After the user confirms the Cookie was replaced locally, call `wechat_official_check_auth` again.
+For `AUTH_REQUIRED`, `AUTH_EXPIRED`, or a read-side `REQUEST_TIMEOUT`, read [references/cookie-setup.md](references/cookie-setup.md), give the local reset steps, and stop the whole authenticated workflow. Do not continue to the requested read or write and do not retry more than once. After the user manually replaces the Cookie and confirms that step, call `wechat_official_check_auth` again. Resume only after it reports `authenticated`.
 
 ## Route reads
 
 - Account name, original ID, avatar, or type: call `wechat_official_get_account_info`.
 - Own published history or title search: call `wechat_official_list_published_articles`; paginate with the returned `nextOffset` and keep pages small.
-- One public `mp.weixin.qq.com/s` URL: call `wechat_official_read_article`. This route does not send the backend Cookie.
+- One public `mp.weixin.qq.com/s` URL: call `wechat_official_read_article` with the default `authentication=auto`. It first sends no Cookie. Only if WeChat returns an environment challenge may it verify the local backend session and retry once with the Cookie. Use `authentication=never` when the Cookie must never be sent, or `required` when the user explicitly wants an authenticated first attempt.
 - Article performance: call `wechat_official_get_article_report`.
 - Follower changes: call `wechat_official_get_follower_report`.
 - Mixed analysis: collect the needed pages, then compute total, mean, median, and trend. Separate recommended and search traffic only when source columns provide that split.
 
 For analytics conclusions, treat only records from the current calendar year as valid by default. Exclude older records from totals, averages, medians, trends, and comparisons unless the user explicitly requests an archival view; label any such older-data view as non-current context.
+
+Public article HTML provides readable content and metadata, not authoritative operator metrics. For reads, shares, likes, comments, or follower data, use the authenticated report tools. If both anonymous and authenticated public-article attempts reach `PUBLIC_ARTICLE_CHALLENGE`, ask the user to open that URL in their own browser and complete WeChat's environment verification. Do not retry again automatically and do not claim that the backend Cookie is expired unless `wechat_official_check_auth` also fails.
 
 ## Upload images and save drafts
 

@@ -1,6 +1,6 @@
 {
   "name": "wechat-official-studio-mcp-server",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "description": "Safely read a logged-in WeChat Official Account, upload approved images, and save reviewed drafts.",

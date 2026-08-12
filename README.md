@@ -111,12 +111,16 @@ cp -R skill/wechat-official-studio "${CODEX_HOME:-$HOME/.codex}/skills/"
 | `wechat_official_check_auth` | 读取 | 检查本地登录状态，不返回认证材料 |
 | `wechat_official_get_account_info` | 读取 | 获取当前公众号基本信息 |
 | `wechat_official_list_published_articles` | 读取 | 分页读取或搜索本账号发表历史 |
-| `wechat_official_read_article` | 读取 | 读取一篇公开公众号文章，不发送后台 Cookie |
+| `wechat_official_read_article` | 读取 | 读取一篇公开公众号文章；默认匿名优先，遇环境验证时才校验登录态并携带本地 Cookie 重试一次 |
 | `wechat_official_get_article_report` | 读取 | 获取图文分析导出数据 |
 | `wechat_official_get_follower_report` | 读取 | 获取用户分析导出数据 |
 | `wechat_official_validate_draft` | 本地读取 | 校验草稿字段、HTML 和图片来源，返回脱敏预览 |
 | `wechat_official_upload_image` | 写入 | 经目录与图片校验后上传素材或正文图片，要求确认 |
 | `wechat_official_create_draft` | 写入 | 保存新草稿，不发布，要求确认 |
+
+除公开文章的匿名首请求和本地草稿校验外，每个使用后台会话的操作都会在实际执行前请求一次轻量登录验证。该验证不会信任缓存 token；一旦发现 Cookie/token 失效、登录跳转或验证超时，当前操作会直接中止，并明确要求用户在本地重新设置 Cookie、再次执行 `wechat_official_check_auth`。只有验证返回 `authenticated` 后才继续后续流程。
+
+公开文章读取支持 `authentication=auto|never|required`。默认 `auto` 不发送 Cookie；只有检测到 `/mp/wappoc_appmsgcaptcha`、“环境异常”等验证页时，才执行登录预检并携带本地 Cookie 重试一次。两次仍被拦截时返回 `PUBLIC_ARTICLE_CHALLENGE`，要求用户在自己的浏览器完成环境验证，不会密集重试。公开页面只用于正文和公开元数据，阅读、分享、点赞等运营指标仍从已登录后台报表读取。
 
 ## 写入参数概要
 

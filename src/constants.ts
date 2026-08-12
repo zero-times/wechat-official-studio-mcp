@@ -1,5 +1,5 @@
 export const SERVER_NAME = "wechat-official-studio-mcp-server";
-export const SERVER_VERSION = "0.2.1";
+export const SERVER_VERSION = "0.2.3";
 export const WECHAT_BASE_URL = "https://mp.weixin.qq.com";
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const MAX_RESPONSE_CHARACTERS = 40_000;

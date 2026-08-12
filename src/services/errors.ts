@@ -5,6 +5,7 @@ export type WechatErrorCode =
   | "UPSTREAM_CHANGED"
   | "UPSTREAM_ERROR"
   | "INVALID_RESPONSE"
+  | "PUBLIC_ARTICLE_CHALLENGE"
   | "WRITE_CONFIRMATION_REQUIRED"
   | "UPLOAD_ERROR"
   | "VALIDATION_ERROR";
@@ -31,8 +32,10 @@ export function errorPayload(error: unknown): Record<string, unknown> {
       requires_cookie_refresh: error.requiresCookieRefresh,
       next_action: writeResultAmbiguous
         ? "Do not retry automatically. Inspect the WeChat material library or draft box first, then retry only after explicit confirmation."
+        : error.code === "PUBLIC_ARTICLE_CHALLENGE"
+          ? "Open the public article URL in the user's own browser and complete WeChat's environment verification, then retry once. Do not replace the backend Cookie unless wechat_official_check_auth also fails."
         : error.requiresCookieRefresh
-          ? "Run npm run configure-cookie in the MCP server directory, then call wechat_official_check_auth again."
+          ? "Stop the current workflow. Manually replace the local Cookie with npm run configure-cookie, then call wechat_official_check_auth again. Continue only after it reports authenticated."
           : "Inspect the error and retry only after correcting the request.",
       ...(error.details ? { details: error.details } : {}),
     };

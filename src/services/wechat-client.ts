@@ -16,10 +16,23 @@ type Session = {
   config: RuntimeConfig;
 };
 
+export type VerifiedSession = {
+  session: Session;
+  homeHtml: string;
+};
+
 type FetchImplementation = typeof fetch;
+
+export type PublicArticleAuthentication = "auto" | "never" | "required";
+export type PublicArticleResponse = {
+  html: string;
+  accessMode: "anonymous" | "authenticated";
+};
 
 const AUTH_TEXT_PATTERN =
   /(请重新登录|登录超时|登录失效|微信扫码登录|login\s*(expired|required)|invalid\s*(session|token))/i;
+const PUBLIC_ARTICLE_CHALLENGE_PATTERN =
+  /(环境异常|完成验证后即可继续访问|访问过于频繁|wappoc_appmsgcaptcha)/i;
 
 export class WechatClient {
   private cachedSession?: Session;
@@ -71,12 +84,15 @@ export class WechatClient {
         (error instanceof Error && /abort|timeout/i.test(`${error.name} ${error.message}`))
       ) {
         const isWrite = method === "POST";
+        const requiresCookieRefresh = !isWrite && includeCookie;
         throw new WechatMcpError(
           "REQUEST_TIMEOUT",
           isWrite
             ? "The WeChat write request timed out and may have succeeded. Inspect the material library or draft box before any retry."
-            : "The WeChat request timed out. Check connectivity, then refresh the local cookie before retrying.",
-          !isWrite,
+            : includeCookie
+              ? "The authenticated WeChat request timed out. Check connectivity, then refresh the local cookie before retrying."
+              : "The public WeChat request timed out before authentication was used. Check connectivity before retrying.",
+          requiresCookieRefresh,
           isWrite ? { write_result_ambiguous: true } : undefined,
         );
       }
@@ -160,6 +176,32 @@ export class WechatClient {
         "The WeChat response indicates that the login session has expired.",
         true,
       );
+    }
+  }
+
+  /**
+   * Perform a lightweight, real network check before an authenticated tool does
+   * any account read or write. This deliberately does not trust cached tokens.
+   */
+  async verifyAuthentication(): Promise<VerifiedSession> {
+    try {
+      const session = await this.getSession();
+      const url = new URL("/cgi-bin/home", WECHAT_BASE_URL);
+      for (const [key, value] of Object.entries({
+        t: "home/index",
+        token: session.token,
+        lang: "zh_CN",
+      })) {
+        url.searchParams.set(key, String(value));
+      }
+      const { response } = await this.requestBackend(url);
+      const homeHtml = await response.text();
+      this.detectAuthFailure(homeHtml);
+      return { session, homeHtml };
+    } catch (error) {
+      // Never let a previously cached token bypass the next explicit check.
+      this.cachedSession = undefined;
+      throw error;
     }
   }
 
@@ -268,8 +310,8 @@ export class WechatClient {
     return buffer;
   }
 
-  async getPublicArticle(urlValue: string): Promise<string> {
-    let url = new URL(urlValue);
+  private validatePublicArticleUrl(urlValue: string): URL {
+    const url = new URL(urlValue);
     if (
       url.origin !== WECHAT_BASE_URL ||
       !(url.pathname === "/s" || url.pathname === "/s/" || url.pathname.startsWith("/s/"))
@@ -279,14 +321,17 @@ export class WechatClient {
         "Only public mp.weixin.qq.com/s article URLs are accepted.",
       );
     }
-    const config = await loadRuntimeConfig().catch(() => ({
-      cookie: "",
-      cookieSource: "cookie_file" as const,
-      timeoutMs: 30_000,
-    }));
+    return url;
+  }
 
+  private async fetchPublicArticleAttempt(
+    initialUrl: URL,
+    config: RuntimeConfig,
+    includeCookie: boolean,
+  ): Promise<{ html?: string; challenged: boolean }> {
+    let url = new URL(initialUrl);
     for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
-      const response = await this.fetchWithTimeout(url, config, false);
+      const response = await this.fetchWithTimeout(url, config, includeCookie);
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
         if (!location) break;
@@ -297,18 +342,60 @@ export class WechatClient {
             "The public article redirected outside mp.weixin.qq.com.",
           );
         }
+        if (/\/mp\/wappoc_appmsgcaptcha/i.test(next.pathname)) {
+          return { challenged: true };
+        }
         url = next;
         continue;
       }
+      if (response.status === 403) return { challenged: true };
       if (!response.ok) {
         throw new WechatMcpError(
           "UPSTREAM_ERROR",
           `The public article returned HTTP ${response.status}.`,
         );
       }
-      return response.text();
+      const html = await response.text();
+      return PUBLIC_ARTICLE_CHALLENGE_PATTERN.test(html)
+        ? { challenged: true }
+        : { html, challenged: false };
     }
     throw new WechatMcpError("UPSTREAM_ERROR", "Too many redirects for the public article.");
+  }
+
+  async getPublicArticle(
+    urlValue: string,
+    authentication: PublicArticleAuthentication = "auto",
+  ): Promise<PublicArticleResponse> {
+    const url = this.validatePublicArticleUrl(urlValue);
+    const anonymousConfig = await loadRuntimeConfig().catch(() => ({
+      cookie: "",
+      cookieSource: "cookie_file" as const,
+      timeoutMs: 30_000,
+    }));
+
+    if (authentication !== "required") {
+      const anonymous = await this.fetchPublicArticleAttempt(url, anonymousConfig, false);
+      if (!anonymous.challenged && anonymous.html !== undefined) {
+        return { html: anonymous.html, accessMode: "anonymous" };
+      }
+      if (authentication === "never") {
+        throw new WechatMcpError(
+          "PUBLIC_ARTICLE_CHALLENGE",
+          "WeChat requires environment verification for this public article, and authenticated fallback is disabled.",
+        );
+      }
+    }
+
+    const { session } = await this.verifyAuthentication();
+    const authenticated = await this.fetchPublicArticleAttempt(url, session.config, true);
+    if (authenticated.challenged || authenticated.html === undefined) {
+      throw new WechatMcpError(
+        "PUBLIC_ARTICLE_CHALLENGE",
+        "WeChat still requires environment verification after one authenticated retry.",
+      );
+    }
+    return { html: authenticated.html, accessMode: "authenticated" };
   }
 
   // ── Write-safe methods ──
