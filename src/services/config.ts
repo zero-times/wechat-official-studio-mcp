@@ -9,6 +9,8 @@ import {
   ALLOWED_IMAGE_EXTENSIONS,
   ALLOWED_IMAGE_MIME_TYPES,
   MAX_UPLOAD_SIZE,
+  MAX_HTML_SOURCE_SIZE,
+  ALLOWED_HTML_EXTENSIONS,
   UPLOAD_ROOTS_ENV,
 } from "../constants.js";
 import type { RuntimeConfig } from "../types.js";
@@ -74,6 +76,13 @@ export type ValidatedImage = {
   buffer: Buffer;
   filename: string;
   mime: (typeof ALLOWED_IMAGE_MIME_TYPES)[number];
+  size: number;
+};
+
+export type ValidatedHtmlSource = {
+  resolvedPath: string;
+  html: string;
+  filename: string;
   size: number;
 };
 
@@ -216,4 +225,65 @@ export function validateImageFile(filePath: string): ValidatedImage {
   }
 
   return { resolvedPath, buffer, filename, mime, size: st.size };
+}
+
+export function validateHtmlSourceFile(filePath: string): ValidatedHtmlSource {
+  const resolvedPath = (() => {
+    try {
+      return realpathSync(filePath);
+    } catch {
+      throw new WechatMcpError(
+        "VALIDATION_ERROR",
+        "The selected HTML source file was not found or is inaccessible.",
+      );
+    }
+  })();
+
+  const roots = resolveUploadRoots();
+  if (!roots.some((root) => isUnderRoot(resolvedPath, root))) {
+    throw new WechatMcpError(
+      "VALIDATION_ERROR",
+      `HTML source is not inside an allowed local root. Check ${UPLOAD_ROOTS_ENV}.`,
+    );
+  }
+
+  const ext = extname(resolvedPath).toLowerCase();
+  if (!ALLOWED_HTML_EXTENSIONS.has(ext)) {
+    throw new WechatMcpError(
+      "VALIDATION_ERROR",
+      "Only .html and .htm source files can be imported into a draft.",
+    );
+  }
+
+  const st = (() => {
+    try {
+      return statSync(resolvedPath);
+    } catch {
+      throw new WechatMcpError("VALIDATION_ERROR", "Cannot inspect the HTML source file.");
+    }
+  })();
+  if (!st.isFile() || st.size === 0) {
+    throw new WechatMcpError(
+      "VALIDATION_ERROR",
+      "The HTML source must be a non-empty regular file.",
+    );
+  }
+  if (st.size > MAX_HTML_SOURCE_SIZE) {
+    throw new WechatMcpError(
+      "VALIDATION_ERROR",
+      `HTML source exceeds the ${MAX_HTML_SOURCE_SIZE}-byte limit.`,
+    );
+  }
+
+  let html: string;
+  try {
+    html = readFileSync(resolvedPath, "utf8");
+  } catch {
+    throw new WechatMcpError("VALIDATION_ERROR", "Cannot read the HTML source file.");
+  }
+  if (html.includes("\0")) {
+    throw new WechatMcpError("VALIDATION_ERROR", "HTML source contains invalid null bytes.");
+  }
+
+  return { resolvedPath, html, filename: basename(resolvedPath), size: st.size };
 }

@@ -25,9 +25,11 @@ import {
   validateDraftArticles,
   buildDraftPayload,
   parseWriteResponse,
+  prepareDraftHtmlDocument,
 } from "./services/parsers.js";
-import { validateImageFile } from "./services/config.js";
+import { validateHtmlSourceFile, validateImageFile } from "./services/config.js";
 import { WechatClient } from "./services/wechat-client.js";
+import type { DraftArticle } from "./types.js";
 
 const client = new WechatClient();
 const responseFormatSchema = z.enum(["markdown", "json"]).default("markdown");
@@ -306,7 +308,7 @@ server.registerTool(
         download: 1,
         source: 99999999,
       });
-      const page = parseReportPage(buffer, offset, limit);
+      const page = parseReportPage(buffer, offset, limit, { begin_date, end_date });
       return formatResult(
         { ok: true, begin_date, end_date, ...page },
         reportMarkdown("图文分析", page),
@@ -374,12 +376,13 @@ function buildDraftToolError(error: unknown) {
 
 // ── Draft validate tool ──
 
-const draftArticleSchema = z.object({
+const draftArticleShape = {
   title: z
     .string()
     .min(1)
     .max(TITLE_MAX_LENGTH)
-    .describe("Article title (1-64 chars)"),
+    .optional()
+    .describe("Article title (1-64 chars); inferred from source_html_path when omitted"),
   author: z
     .string()
     .max(AUTHOR_MAX_LENGTH)
@@ -394,7 +397,15 @@ const draftArticleSchema = z.object({
     .string()
     .min(1)
     .max(CONTENT_HTML_MAX_LENGTH)
-    .describe("HTML body content (1-500000 chars)"),
+    .optional()
+    .describe("HTML body content (1-500000 chars); use either this or source_html_path"),
+  source_html_path: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Local .html/.htm source inside WECHAT_OFFICIAL_UPLOAD_ROOTS. CSS is inlined; the duplicate body h1, outer layout margins, links, publish-config section, and empty list rows are removed; real bullets, internal styles, and ad copy are preserved.",
+    ),
   source_url: z
     .string()
     .url()
@@ -419,14 +430,97 @@ const draftArticleSchema = z.object({
     .boolean()
     .default(false)
     .describe("Restrict comments to fans only"),
-});
+};
+
+function makeDraftArticleSchema(requireCover: boolean) {
+  return z
+    .object({
+      ...draftArticleShape,
+      cover_media_id: requireCover
+        ? z.string().min(1).max(512).describe("Media/file ID from upload_image")
+        : draftArticleShape.cover_media_id,
+    })
+    .strict()
+    .superRefine((value, context) => {
+      const sourceCount = Number(Boolean(value.content_html)) + Number(Boolean(value.source_html_path));
+      if (sourceCount !== 1) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Provide exactly one of content_html or source_html_path.",
+          path: ["content_html"],
+        });
+      }
+      if (!value.source_html_path && !value.title) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "title is required when content_html is supplied directly.",
+          path: ["title"],
+        });
+      }
+    });
+}
+
+const draftArticleSchema = makeDraftArticleSchema(false);
+const draftArticleWithCoverSchema = makeDraftArticleSchema(true);
+
+type DraftArticleToolInput = z.infer<typeof draftArticleSchema>;
+
+function resolveDraftArticleInputs(inputs: DraftArticleToolInput[]) {
+  const htmlImports: Array<Record<string, unknown>> = [];
+  const articles: DraftArticle[] = inputs.map((input, index) => {
+    let title = input.title;
+    let digest = input.digest;
+    let contentHtml = input.content_html;
+
+    if (input.source_html_path) {
+      const source = validateHtmlSourceFile(input.source_html_path);
+      const prepared = prepareDraftHtmlDocument(source.html, source.filename);
+      title = title || prepared.title;
+      digest = digest || prepared.digest;
+      contentHtml = prepared.content_html;
+      htmlImports.push({
+        article_index: index,
+        source_filename: prepared.source_filename,
+        source_size: source.size,
+        removed_link_count: prepared.removed_link_count,
+        removed_publish_config_count: prepared.removed_publish_config_count,
+        removed_title_count: prepared.removed_title_count,
+        compacted_list_count: prepared.compacted_list_count,
+        removed_empty_list_item_count: prepared.removed_empty_list_item_count,
+        normalized_bordered_callout_count: prepared.normalized_bordered_callout_count,
+        preserved_ad_count: prepared.preserved_ad_count,
+        inline_style_count: prepared.inline_style_count,
+      });
+    }
+
+    if (!title || !contentHtml) {
+      throw new WechatMcpError(
+        "VALIDATION_ERROR",
+        `Article ${index + 1} could not resolve a title and HTML body.`,
+      );
+    }
+
+    return {
+      title,
+      ...(input.author ? { author: input.author } : {}),
+      ...(digest ? { digest } : {}),
+      content_html: contentHtml,
+      ...(input.source_url ? { source_url: input.source_url } : {}),
+      ...(input.cover_media_id ? { cover_media_id: input.cover_media_id } : {}),
+      show_cover: input.show_cover,
+      open_comment: input.open_comment,
+      fans_only_comment: input.fans_only_comment,
+    };
+  });
+  return { articles, htmlImports };
+}
 
 server.registerTool(
   "wechat_official_validate_draft",
   {
     title: "Validate a draft before saving",
     description:
-      "Local-only validation of article drafts for a WeChat Official Account. Checks title/author/digest lengths, HTML content for forbidden tags and URLs, and cover media IDs. Returns errors, warnings, and per-article summaries. Does not access the network.",
+      "Local-only validation of article drafts for a WeChat Official Account. Can import an approved original HTML file, inline its CSS like rich-text browser copy, remove the duplicate body title and outer layout margins, compact list whitespace, normalize simple bordered blocks to a WeChat-compatible rounded paragraph callout, remove hyperlinks and publish configuration, preserve real bullets and ad copy, and validate the resulting draft. Does not access WeChat.",
     inputSchema: z
       .object({
         articles: z
@@ -446,7 +540,9 @@ server.registerTool(
   },
   async ({ articles, response_format }) => {
     try {
-      const result = validateDraftArticles(articles as import("./types.js").DraftArticle[]);
+      const resolved = resolveDraftArticleInputs(articles as DraftArticleToolInput[]);
+      const result = validateDraftArticles(resolved.articles);
+      const responseData = { ...result, html_imports: resolved.htmlImports };
       const markdown = [
         result.valid ? "# Draft looks good" : "# Draft has issues",
         "",
@@ -463,16 +559,26 @@ server.registerTool(
           (s) =>
             `- **#${s.index + 1}** "${s.title}" — ${s.char_count} text chars, ${s.image_count} image(s), cover: ${s.has_cover ? "yes" : "pending"}, comments: ${s.open_comment ? (s.fans_only_comment ? "fans only" : "open") : "off"}`,
         ),
+        ...(resolved.htmlImports.length > 0
+          ? [
+              "",
+              "## HTML imports",
+              ...resolved.htmlImports.map(
+                (item) =>
+                  `- ${item.source_filename}: ${item.inline_style_count} inline styles, ${item.removed_link_count} links removed, ${item.removed_title_count} duplicate body title(s) removed, ${item.compacted_list_count} list(s) compacted, ${item.removed_empty_list_item_count} empty list item(s) removed, ${item.normalized_bordered_callout_count} bordered callout(s) normalized, ${item.removed_publish_config_count} publish-config section(s) removed, ${item.preserved_ad_count} ad block(s) preserved`,
+              ),
+            ]
+          : []),
       ].join("\n");
 
       return {
         content: [
           {
             type: "text" as const,
-            text: response_format === "json" ? JSON.stringify(result, null, 2) : markdown,
+            text: response_format === "json" ? JSON.stringify(responseData, null, 2) : markdown,
           },
         ],
-        structuredContent: result,
+        structuredContent: responseData,
       };
     } catch (error) {
       return buildDraftToolError(error);
@@ -621,11 +727,11 @@ server.registerTool(
   {
     title: "Create and save a WeChat draft",
     description:
-      "Create and save up to 8 articles as a draft on the logged-in WeChat Official Account. Uses cover media IDs from prior uploads. Requires confirm=true. The draft is saved but never published.",
+      "Create and save up to 8 articles as a draft. Accepts direct HTML or an approved source_html_path; source files keep CSS as inline styles while the duplicate body title, outer layout margins, empty list rows, hyperlinks, and publish configuration are removed. Simple bordered blocks are normalized to a WeChat-compatible rounded paragraph callout; real bullets and ad copy are preserved. Requires uploaded cover media IDs and confirm=true. Never publishes.",
     inputSchema: z
       .object({
         articles: z
-          .array(draftArticleSchema.extend({ cover_media_id: z.string().min(1).max(512) }))
+          .array(draftArticleWithCoverSchema)
           .min(DRAFT_MIN_ARTICLES)
           .max(DRAFT_MAX_ARTICLES)
           .describe("1-8 draft articles with cover media IDs from prior upload_image calls"),
@@ -648,9 +754,11 @@ server.registerTool(
 
       await client.verifyAuthentication();
 
+      const resolved = resolveDraftArticleInputs(articles as DraftArticleToolInput[]);
+
       // Validate locally first
       const validation = validateDraftArticles(
-        articles as import("./types.js").DraftArticle[],
+        resolved.articles,
         { requireCover: true },
       );
       if (!validation.valid) {
@@ -676,7 +784,7 @@ server.registerTool(
       }
 
       // Build and send payload
-      const fields = buildDraftPayload(articles as import("./types.js").DraftArticle[], context);
+      const fields = buildDraftPayload(resolved.articles, context);
       const result = await client.postForm(
         "/cgi-bin/operate_appmsg",
         { t: "ajax-response", sub: "create", type: "77" },
@@ -689,8 +797,9 @@ server.registerTool(
         ok: true,
         status: "draft_saved",
         draft_msgid: String(parsed.data.msgid ?? parsed.data.appmsgid ?? parsed.data.nested_msgid ?? ""),
-        article_count: articles.length,
-        titles: articles.map((article) => article.title),
+        article_count: resolved.articles.length,
+        titles: resolved.articles.map((article) => article.title),
+        html_imports: resolved.htmlImports,
       };
 
       const markdown = [

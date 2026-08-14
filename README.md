@@ -26,6 +26,7 @@
 
 - 上传 JPEG、PNG、GIF 图片到素材库或正文图片空间；
 - 校验一至八篇文章组成的草稿；
+- 直接导入允许目录内的原始 HTML：将文档 CSS 内联为富文本样式，移除正文重复标题、超链接、“发布配置”区和最外层版心边距，压紧列表空白行，保留正文广告位文案；
 - 将已确认的文章保存到草稿箱。
 
 写入能力属于实验功能：它依赖微信公众号后台网页当前使用的非公开接口。首次使用或微信后台改版后，应先用测试图片和测试草稿验证，不要把草稿保存成功等同于可直接发布。
@@ -38,7 +39,7 @@
 - `.wechat-cookie` 由配置脚本以 `0600` 权限写入，并被项目级 `.gitignore` 排除；
 - 后台请求采用 GET/POST 独立路径白名单，未登记路径会被拒绝；
 - 所有上传和草稿写入都要求 `confirm=true`；
-- 上传文件必须位于 `WECHAT_OFFICIAL_UPLOAD_ROOTS` 指定目录内，并经过真实路径、扩展名、文件头和大小校验；
+- 上传图片和导入的 HTML 必须位于 `WECHAT_OFFICIAL_UPLOAD_ROOTS` 指定目录内，并经过真实路径、扩展名和大小校验；图片还会校验文件头；
 - 工具结果不返回 Cookie、token、ticket、账号内部标识、原始上游响应或本地绝对路径；
 - 超时后的写入结果可能不确定，MCP 不会自动重试，避免重复素材或重复草稿；
 - 不包含发布和删除工具，草稿必须回到微信公众平台人工检查后再发布。
@@ -71,15 +72,15 @@ npm run configure-cookie -- --from-clipboard
 
 Cookie 更新后会在下一次调用时重新读取，通常不需要重启 MCP。如果配置了 `WECHAT_OFFICIAL_COOKIE` 环境变量，它会优先于文件，此时需要更新客户端配置并重启 MCP 进程。
 
-## 配置允许上传的目录
+## 配置允许读取的本地内容目录
 
-默认禁止读取任何本地图片。使用上传工具前，必须显式设置允许目录：
+默认禁止读取本地图片和 HTML。使用上传或 HTML 导入前，必须显式设置允许目录：
 
 ```bash
-export WECHAT_OFFICIAL_UPLOAD_ROOTS="/absolute/path/to/covers:/absolute/path/to/article-images"
+export WECHAT_OFFICIAL_UPLOAD_ROOTS="/absolute/path/to/article-batch:/absolute/path/to/other-approved-content"
 ```
 
-macOS/Linux 使用冒号分隔多个目录，Windows 使用分号。只配置确实需要上传的素材目录，不要配置用户主目录、磁盘根目录或包含密钥的目录。
+macOS/Linux 使用冒号分隔多个目录，Windows 使用分号。只配置确实需要导入或上传的内容目录，不要配置用户主目录、磁盘根目录或包含密钥的目录。
 
 ## 注册 MCP
 
@@ -114,7 +115,7 @@ cp -R skill/wechat-official-studio "${CODEX_HOME:-$HOME/.codex}/skills/"
 | `wechat_official_read_article` | 读取 | 读取一篇公开公众号文章；默认匿名优先，遇环境验证时才校验登录态并携带本地 Cookie 重试一次 |
 | `wechat_official_get_article_report` | 读取 | 获取图文分析导出数据 |
 | `wechat_official_get_follower_report` | 读取 | 获取用户分析导出数据 |
-| `wechat_official_validate_draft` | 本地读取 | 校验草稿字段、HTML 和图片来源，返回脱敏预览 |
+| `wechat_official_validate_draft` | 本地读取 | 校验草稿；可从 `source_html_path` 直接导入 HTML、内联 CSS、移除链接和发布配置，并返回脱敏预览 |
 | `wechat_official_upload_image` | 写入 | 经目录与图片校验后上传素材或正文图片，要求确认 |
 | `wechat_official_create_draft` | 写入 | 保存新草稿，不发布，要求确认 |
 
@@ -130,7 +131,8 @@ cp -R skill/wechat-official-studio "${CODEX_HOME:-$HOME/.codex}/skills/"
   - `usage=article`：上传正文图片，返回 `cdn_url`；
   - `confirm=true`：必须在用户确认文件和用途后设置。
 - `wechat_official_create_draft`
-  - `articles`：1—8 篇；每篇包含标题、HTML 正文、封面素材 ID，并可设置作者、摘要、来源链接和评论；
+  - `articles`：1—8 篇；每篇必须提供 `content_html` 或 `source_html_path` 之一，以及封面素材 ID；标题和摘要可从原 HTML 推断；
+  - `source_html_path`：从允许目录直接读取 `.html/.htm`。MCP 会把 `<style>` 计算为元素内联样式，删除正文 `<h1>`（标题仍写入公众号标题字段）、“发布配置”区和最外层容器的宽度/左右边距，把 `<a>` 转成无链接的 `<span>`；列表会移除空项和节点间空白，并把有效 `<li>` 的上下 margin 归零；正文中显式带边框、没有嵌套块级内容的卡片会转成已验证兼容的 `<p>` 蓝色圆角卡片，保留正常项目符号、锚文本、数据属性和 `.ad` 广告位文案；
   - `confirm=true`：必须在最终草稿预览经用户确认后设置；
   - 只创建新草稿，不修改已有草稿，也不发布。
 
@@ -147,6 +149,7 @@ cp -R skill/wechat-official-studio "${CODEX_HOME:-$HOME/.codex}/skills/"
 
 1. `wechat_official_check_auth`
 2. `wechat_official_validate_draft`
+   - 原 HTML 已存在时优先传 `source_html_path`，不要先转纯文本或重新拼装正文；
 3. 向用户展示账号、标题、内容长度、图片文件名、评论设置与警告
 4. 用户明确确认
 5. `wechat_official_upload_image`，传入 `confirm=true`

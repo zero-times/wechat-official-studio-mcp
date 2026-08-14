@@ -36,7 +36,8 @@ Read [references/write-safety.md](references/write-safety.md) before the first w
 
 1. Confirm authentication and the intended account.
 2. Call `wechat_official_validate_draft` with the complete article payload. Resolve validation errors and surface warnings.
-3. Show a concise preview: account, titles, content lengths, cover filenames, comment settings, source URLs, and validation warnings. Do not expose absolute local paths.
+   When an approved original `.html`/`.htm` file exists, pass it as `source_html_path` instead of reconstructing `content_html`. The MCP inlines document CSS to match rich-text browser copy, removes the duplicate body `h1` and outer layout width/margins, compacts list whitespace while retaining real bullets, normalizes simple bordered blocks to the compatible blue rounded paragraph-callout style, converts links to styled non-link text, removes the publish-configuration section, and preserves body ad copy and other article content.
+3. Show a concise preview: account, titles, content lengths, cover filenames, comment settings, source URLs, validation warnings, and HTML import counts for inline styles, removed links, normalized bordered callouts, removed publish-config sections, and preserved ad blocks. Do not expose absolute local paths.
 4. Obtain explicit user approval for that preview. A request to “help write an article” is not approval to write the account; approval must name or clearly refer to saving the reviewed content to the draft box.
 5. Call `wechat_official_upload_image` only for approved files inside configured upload roots, with `confirm=true`. Use `usage=material` for covers/material-library images and `usage=article` for body-image URLs.
 6. Insert returned body-image URLs into HTML when needed. Use the returned material/file ID as `cover_media_id`.

@@ -50,6 +50,7 @@ export type ReportPage = {
   nextOffset?: number;
   columns: string[];
   rows: Record<string, string>[];
+  title?: string;
 };
 
 // ── Draft & write types ──
@@ -64,6 +65,21 @@ export type DraftArticle = {
   show_cover: boolean;
   open_comment: boolean;
   fans_only_comment: boolean;
+};
+
+export type PreparedHtmlDraft = {
+  title: string;
+  digest?: string;
+  content_html: string;
+  source_filename: string;
+  removed_link_count: number;
+  removed_publish_config_count: number;
+  removed_title_count: number;
+  compacted_list_count: number;
+  removed_empty_list_item_count: number;
+  normalized_bordered_callout_count: number;
+  preserved_ad_count: number;
+  inline_style_count: number;
 };
 
 export type DraftValidationResult = {

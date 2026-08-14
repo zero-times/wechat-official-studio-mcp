@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { validateImageFile } from "../src/services/config.js";
+import { validateHtmlSourceFile, validateImageFile } from "../src/services/config.js";
 import { WechatMcpError } from "../src/services/errors.js";
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -29,6 +29,30 @@ test("accepts a matching image inside an approved upload root", () => {
     assert.equal(result.filename, "cover.png");
     assert.equal(result.mime, "image/png");
     assert.equal(result.size, PNG_BYTES.length);
+  });
+});
+
+test("accepts an HTML source inside an approved local root", () => {
+  withUploadRoot((root) => {
+    const source = join(root, "article.html");
+    writeFileSync(source, "<!doctype html><html><body><article>正文</article></body></html>");
+    const result = validateHtmlSourceFile(source);
+    assert.equal(result.filename, "article.html");
+    assert.match(result.html, /正文/);
+  });
+});
+
+test("rejects a non-HTML draft source", () => {
+  withUploadRoot((root) => {
+    const source = join(root, "article.txt");
+    writeFileSync(source, "正文");
+    assert.throws(
+      () => validateHtmlSourceFile(source),
+      (error: unknown) =>
+        error instanceof WechatMcpError &&
+        error.code === "VALIDATION_ERROR" &&
+        /\.html/.test(error.message),
+    );
   });
 });
 

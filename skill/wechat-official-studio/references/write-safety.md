@@ -17,6 +17,7 @@ Before setting `confirm=true`, show the user:
 - each upload basename and intended usage;
 - cover assignment, source URL, cover-display flag, and comment settings;
 - all validator warnings.
+- for direct HTML imports: source basename, inline-style count, removed-link count, removed duplicate-title count, compacted-list count, removed-empty-list-item count, normalized-bordered-callout count, removed publish-config count, and preserved ad-block count.
 
 Require explicit approval of this preview. If any title, content, file, setting, or account changes after approval, show the changed preview and confirm again.
 
@@ -24,6 +25,7 @@ Require explicit approval of this preview. If any title, content, file, setting,
 
 - Never widen `WECHAT_OFFICIAL_UPLOAD_ROOTS` on the user's behalf.
 - Never upload a path outside the configured roots.
+- Never import an HTML source outside the same configured roots. Prefer `source_html_path` so the MCP performs deterministic CSS inlining and content removal instead of model-side HTML reconstruction.
 - Never print the absolute path. Report only the basename, size, and detected MIME type.
 - Reject symbolic-link escapes, unsupported formats, empty files, and oversized files.
 

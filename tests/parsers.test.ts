@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { load } from "cheerio";
 import type { DraftArticle, EditorContext } from "../src/types.js";
 import {
   parseAccountInfo,
@@ -11,6 +12,7 @@ import {
   validateDraftHtml,
   buildDraftPayload,
   parseWriteResponse,
+  prepareDraftHtmlDocument,
 } from "../src/services/parsers.js";
 
 test("parses account fields without exposing session data", () => {
@@ -148,6 +150,77 @@ test("derives the editor template version from the versioned stylesheet", () => 
 });
 
 // ── Draft HTML validation ──
+
+test("imports rendered HTML with inline styles while removing only links and publish config", () => {
+  const result = prepareDraftHtmlDocument(`
+    <!doctype html><html><head><title>备用标题</title><style>
+      article{padding:20px;background:#fff} .conclusion{color:#135790;font-weight:700}
+      .ad{border:1px dashed #999} a{color:#008000;text-decoration:none}
+    </style></head><body><article>
+      <h1>原始标题</h1>
+      <p class="conclusion">保留样式</p>
+      <div class="ad">文中程序化广告位｜保留广告配置文案</div>
+      <div class="miniapp" data-miniapp-path="pages/material/index" style="padding:20px;border-radius:12px;background:#f0f8f7;border:1px solid #cce5df"><strong>材料整理：</strong>生成补充清单。</div>
+      <p>进入<a href="https://example.com/path">材料整理</a>继续。</p>
+      <ul><li style="margin:8px 0">第一项</li>\n  <li>   </li>\n  <li style="margin-top:8px;margin-bottom:8px">第二项</li></ul>
+      <section class="editor"><h2>发布配置</h2><p><strong>摘要：</strong>这是摘要。</p><p><strong>广告位：</strong>约 50% 处。</p></section>
+    </article></body></html>
+  `, "source.html");
+
+  assert.equal(result.title, "原始标题");
+  assert.equal(result.digest, "这是摘要。");
+  assert.equal(result.source_filename, "source.html");
+  assert.equal(result.removed_link_count, 1);
+  assert.equal(result.removed_publish_config_count, 1);
+  assert.equal(result.removed_title_count, 1);
+  assert.equal(result.compacted_list_count, 1);
+  assert.equal(result.removed_empty_list_item_count, 1);
+  assert.equal(result.normalized_bordered_callout_count, 2);
+  assert.equal(result.preserved_ad_count, 1);
+  assert.ok(result.inline_style_count >= 3);
+  assert.match(result.content_html, /color:\s*#135790/i);
+  assert.doesNotMatch(result.content_html, /border:\s*1px dashed #999/i);
+  assert.match(result.content_html, /保留广告配置文案/);
+  assert.match(result.content_html, /材料整理/);
+  assert.doesNotMatch(result.content_html, /<a\b/i);
+  assert.doesNotMatch(result.content_html, /href=/i);
+  assert.doesNotMatch(result.content_html, /发布配置/);
+  assert.doesNotMatch(result.content_html, /约 50% 处/);
+  assert.doesNotMatch(result.content_html, /<h1\b/i);
+  const rootStyle = load(result.content_html)("article").attr("style") ?? "";
+  assert.doesNotMatch(rootStyle, /(?:^|;)\s*(?:margin|padding|max-width|width)\s*:/i);
+  assert.match(rootStyle, /background:\s*#fff/i);
+  const preparedDocument = load(result.content_html);
+  const normalizedCallouts = preparedDocument("p.ad, p.miniapp");
+  assert.equal(normalizedCallouts.length, 2);
+  normalizedCallouts.each((_, item) => {
+    const style = preparedDocument(item).attr("style") ?? "";
+    assert.match(style, /padding:\s*18px 20px/i);
+    assert.match(style, /border-radius:\s*10px/i);
+    assert.match(style, /background:\s*#edf6ff/i);
+    assert.match(style, /color:\s*#244a70/i);
+    assert.doesNotMatch(style, /(?:^|;)\s*border(?:-(?:top|right|bottom|left))?\s*:/i);
+  });
+  assert.equal(preparedDocument("p.miniapp").attr("data-miniapp-path"), "pages/material/index");
+  assert.equal(preparedDocument("ul > li").length, 2);
+  preparedDocument("ul > li").each((_, item) => {
+    const style = preparedDocument(item).attr("style") ?? "";
+    assert.match(style, /margin:\s*0/i);
+    assert.doesNotMatch(style, /margin-(?:top|bottom)/i);
+  });
+  const listHtml = preparedDocument("ul").html() ?? "";
+  assert.doesNotMatch(listHtml, />\s+</);
+});
+
+test("keeps existing inline styles during draft validation", () => {
+  const result = validateDraftHtml(
+    '<p style="margin:0 0 18px;color:#253044"><strong style="font-weight:700">正文</strong></p>',
+    0,
+  );
+  assert.equal(result.errors.length, 0);
+  assert.match(result.sanitized, /margin:0 0 18px/);
+  assert.match(result.sanitized, /font-weight:700/);
+});
 
 test("accepts clean HTML", () => {
   const result = validateDraftHtml("<p>Hello <b>world</b></p>", 0);
@@ -459,3 +532,219 @@ test("does not leak sensitive data in parsed response", () => {
   assert.equal("token" in result.data, false);
   assert.equal("ticket" in result.data, false);
 });
+
+// ── XLS report parsing (OLE2 + BIFF8) ──
+
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isOle2, parseXlsReport, extractReportRange, parseBiff8Workbook } from "../src/services/xls.js";
+
+const fixturePath = resolve(dirname(fileURLToPath(import.meta.url)), "fixtures", "appmsganalysis-template.xls");
+
+function readFixture(): ArrayBuffer {
+  const bytes = readFileSync(fixturePath);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+// Minimal OLE2 + BIFF8 writer: single Workbook stream of 4608 bytes living in
+// regular sectors (no mini stream), one directory sector, one FAT sector.
+function buildXls(title: string, header: string[], rows: (string | number)[][]): ArrayBuffer {
+  const sectorSize = 512;
+  const biff = buildBiff(title, header, rows);
+  const workbookSize = 4608;
+  const workbook = new Uint8Array(workbookSize);
+  workbook.set(biff, 0);
+  // pad with unknown-type records; parsers skip unknown records
+  for (let p = biff.length; p + 4 <= workbookSize; p += 4) {
+    workbook[p] = 0x00;
+    workbook[p + 1] = 0x00;
+    workbook[p + 2] = 0x00;
+    workbook[p + 3] = 0x00;
+  }
+  const out = new Uint8Array(512 + 11 * sectorSize);
+  // header
+  out.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1], 0);
+  out[24] = 0x3e; out[25] = 0x00; // minor version
+  out[26] = 0x03; out[27] = 0x00; // major version
+  out[28] = 0xfe; out[29] = 0xff; // byte order
+  out.set([9, 0], 30); // sector shift 512
+  out.set([6, 0], 32); // mini sector shift 64
+  out.set([1, 0, 0, 0], 40); // directory sector count (deprecated)
+  out.set([1, 0, 0, 0], 44); // FAT count
+  out.set([9, 0, 0, 0], 48); // first directory sector
+  out.set([0, 0, 0, 0], 52); // transaction
+  out.set([0, 0, 16, 0], 56); // mini stream cutoff 4096
+  out.set([0xff, 0xff, 0xff, 0xfe], 60); // no mini FAT
+  out.set([0, 0, 0, 0], 64); // mini FAT count
+  out.set([0xff, 0xff, 0xff, 0xfe], 68); // no DIFAT chain
+  out.set([0, 0, 0, 0], 72); // DIFAT count
+  out.set([10, 0, 0, 0], 76); // DIFAT[0] -> FAT sector 10
+  for (let i = 1; i < 109; i++) out.set([0xff, 0xff, 0xff, 0xff], 76 + i * 4);
+  // workbook data sectors 0..8
+  for (let i = 0; i < 9; i++) out.set(workbook.subarray(i * sectorSize, (i + 1) * sectorSize), 512 + i * sectorSize);
+  // directory sector 9
+  const dir = 512 + 9 * sectorSize;
+  writeUtf16(out, dir, "Root Entry");
+  out[dir + 64] = 0; out[dir + 65] = 0; // name length 10 chars (2 bytes each)
+  out[dir + 66] = 5; // root entry
+  out.set([0xff, 0xff, 0xff, 0xfe], dir + 116); // no mini stream
+  writeUtf16(out, dir + 128, "Workbook");
+  out[dir + 128 + 64] = 16; out[dir + 128 + 65] = 0; // name length 8 chars
+  out[dir + 128 + 66] = 2; // stream entry
+  out.set([0, 0, 0, 0], dir + 128 + 116); // first sector 0
+  out.set([0x00, 0x12, 0x00, 0x00], dir + 128 + 120); // size 4608
+  // FAT sector 10
+  const fat = 512 + 10 * sectorSize;
+  for (let i = 0; i < 8; i++) out.set([i + 1, 0, 0, 0], fat + i * 4);
+  out.set([0xfe, 0xff, 0xff, 0xff], fat + 8 * 4); // end of workbook chain
+  out.set([0xfe, 0xff, 0xff, 0xff], fat + 9 * 4); // end of directory chain
+  out.set([0xfe, 0xff, 0xff, 0xff], fat + 10 * 4); // end of FAT chain
+  for (let i = 11; i < 128; i++) out.set([0xff, 0xff, 0xff, 0xff], fat + i * 4);
+  return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+}
+
+function writeUtf16(out: Uint8Array, offset: number, text: string) {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    out[offset + i * 2] = code & 0xff;
+    out[offset + i * 2 + 1] = (code >> 8) & 0xff;
+  }
+}
+
+function biffRecord(type: number, data: Uint8Array): Uint8Array {
+  const record = new Uint8Array(4 + data.length);
+  record[0] = type & 0xff;
+  record[1] = (type >> 8) & 0xff;
+  record[2] = data.length & 0xff;
+  record[3] = (data.length >> 8) & 0xff;
+  record.set(data, 4);
+  return record;
+}
+
+function biffLabel(row: number, col: number, text: string): Uint8Array {
+  // Record layout: row(2) col(2) xf(2) cch(2) flags(1) chars...
+  const head = new Uint8Array(9);
+  head[0] = row & 0xff; head[1] = (row >> 8) & 0xff;
+  head[2] = col & 0xff; head[3] = (col >> 8) & 0xff;
+  head[4] = 0; head[5] = 0; // xf
+  head[6] = text.length & 0xff; head[7] = (text.length >> 8) & 0xff;
+  head[8] = 0x01; // flags: wide string
+  const chars = new Uint8Array(text.length * 2);
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    chars[i * 2] = code & 0xff;
+    chars[i * 2 + 1] = (code >> 8) & 0xff;
+  }
+  return biffRecord(0x0204, concatBytes(head, chars));
+}
+
+function biffNumber(row: number, col: number, value: number): Uint8Array {
+  const head = new Uint8Array(6);
+  head[0] = row & 0xff; head[1] = (row >> 8) & 0xff;
+  head[2] = col & 0xff; head[3] = (col >> 8) & 0xff;
+  head[4] = 0; head[5] = 0;
+  const valueBytes = new Uint8Array(8);
+  new DataView(valueBytes.buffer).setFloat64(0, value, true);
+  return biffRecord(0x0203, concatBytes(head, valueBytes));
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
+  return result;
+}
+
+function buildBiff(title: string, header: string[], rows: (string | number)[][]): Uint8Array {
+  const parts: Uint8Array[] = [];
+  // globals BOF + sheet BOF (type 0x0010 worksheet)
+  const globalsBof = new Uint8Array(16);
+  globalsBof[0] = 0x00; globalsBof[1] = 0x06; globalsBof[2] = 0x05; globalsBof[3] = 0x00;
+  parts.push(biffRecord(0x0809, globalsBof));
+  const sheetBof = new Uint8Array(16);
+  sheetBof[0] = 0x00; sheetBof[1] = 0x06; sheetBof[2] = 0x10; sheetBof[3] = 0x00;
+  parts.push(biffRecord(0x0809, sheetBof));
+  const grid: (string | number | null)[][] = [[title], [ ...header ], ...rows];
+  grid.forEach((row, r) => row.forEach((value, c) => {
+    if (value === null) return;
+    if (typeof value === "string") parts.push(biffLabel(r, c, value));
+    else parts.push(biffNumber(r, c, value));
+  }));
+  parts.push(biffRecord(0x000a, new Uint8Array(0)));
+  return concatBytes(...parts);
+}
+
+test("detects OLE2 magic on the real WeChat export", () => {
+  assert.equal(isOle2(new Uint8Array(readFixture())), true);
+  assert.equal(isOle2(new Uint8Array([0x50, 0x4b, 0x03, 0x04])), false);
+});
+
+test("extracts the range from the report title", () => {
+  assert.deepEqual(extractReportRange("全部群发详细数据-日报（2025-10-01至2025-11-01）"), {
+    begin: "2025-10-01",
+    end: "2025-11-01",
+  });
+  assert.equal(extractReportRange("无范围标题"), undefined);
+});
+
+test("parses the real WeChat template export into a sheet", () => {
+  const sheet = parseXlsReport(readFixture());
+  assert.ok(sheet);
+  assert.match(sheet.title ?? "", /日报/);
+  assert.deepEqual(sheet.rows[1]?.slice(1, 11), [
+    "日期",
+    "阅读次数",
+    "阅读人数",
+    "分享次数",
+    "分享人数",
+    "阅读原文次数",
+    "阅读原文人数",
+    "收藏次数",
+    "收藏人数",
+    "渠道",
+  ]);
+  assert.equal(sheet.rows.length, 290);
+});
+
+test("parseReportPage rejects the zeroed template with a clear error", () => {
+  assert.throws(
+    () => parseReportPage(readFixture(), 0, 30, { begin_date: "2026-08-05", end_date: "2026-08-12" }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return error instanceof Error && (error as { code?: string }).code === "NO_DATA" && /template/i.test(message);
+    },
+  );
+});
+
+test("parseReportPage parses a synthetic XLS with real values", () => {
+  const xls = buildXls("全部群发详细数据-日报（2026-08-05至2026-08-12）", ["日期", "阅读次数", "渠道"], [
+    ["2026-08-05", 0, "公众号消息"],
+    ["2026-08-05", 0, "搜一搜"],
+    ["2026-08-05", 120, "推荐"],
+    ["2026-08-06", 8, "搜一搜"],
+  ]);
+  const page = parseReportPage(xls, 0, 10, { begin_date: "2026-08-05", end_date: "2026-08-12" });
+  assert.equal(page.total, 4);
+  assert.equal(page.rows[0]?.["日期"], "2026-08-05");
+  assert.equal(page.rows[0]?.["阅读次数"], "0");
+  assert.equal(page.rows[0]?.["渠道"], "公众号消息");
+  assert.equal(page.rows[2]?.["阅读次数"], "120");
+  assert.equal(page.rows[2]?.["渠道"], "推荐");
+  assert.equal(page.title, "全部群发详细数据-日报（2026-08-05至2026-08-12）");
+});
+
+test("parseBiff8Workbook skips unknown records", () => {
+  const xls = buildXls("t", ["a"], [["1"]]);
+  const workbook = parseOle2ForTest(xls);
+  assert.ok(workbook);
+});
+
+import { parseOle2Streams } from "../src/services/xls.js";
+function parseOle2ForTest(xls: ArrayBuffer): Uint8Array | undefined {
+  return parseOle2Streams(new Uint8Array(xls)).get("Workbook");
+}

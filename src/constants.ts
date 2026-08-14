@@ -1,5 +1,5 @@
 export const SERVER_NAME = "wechat-official-studio-mcp-server";
-export const SERVER_VERSION = "0.2.3";
+export const SERVER_VERSION = "0.3.0";
 export const WECHAT_BASE_URL = "https://mp.weixin.qq.com";
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const MAX_RESPONSE_CHARACTERS = 40_000;
@@ -33,7 +33,9 @@ export const WRITE_POST_PATHS = new Set([
 
 export const UPLOAD_ROOTS_ENV = "WECHAT_OFFICIAL_UPLOAD_ROOTS";
 export const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10 MiB
+export const MAX_HTML_SOURCE_SIZE = 2 * 1024 * 1024; // 2 MiB
 export const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif"]);
+export const ALLOWED_HTML_EXTENSIONS = new Set([".html", ".htm"]);
 export const ALLOWED_IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/gif"] as const;
 
 // ── Draft validation ──

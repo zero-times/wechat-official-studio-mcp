@@ -1,5 +1,6 @@
 import { load } from "cheerio";
 import { parse as parseCsv } from "csv-parse/sync";
+import juice from "juice";
 import type {
   AccountInfo,
   DraftArticle,
@@ -7,6 +8,7 @@ import type {
   EditorContext,
   PublishedArticle,
   PublishedArticlePage,
+  PreparedHtmlDraft,
   ReportPage,
 } from "../types.js";
 import {
@@ -19,6 +21,202 @@ import {
   CONTENT_HTML_MAX_LENGTH,
 } from "../constants.js";
 import { WechatMcpError } from "./errors.js";
+import { isOle2, parseXlsReport, extractReportRange, type XlsSheet } from "./xls.js";
+
+export function prepareDraftHtmlDocument(
+  sourceHtml: string,
+  sourceFilename = "article.html",
+): PreparedHtmlDraft {
+  const source = load(sourceHtml);
+  const title =
+    source("article h1").first().text().trim() ||
+    source("h1").first().text().trim() ||
+    source("title").first().text().trim();
+  if (!title) {
+    throw new WechatMcpError(
+      "VALIDATION_ERROR",
+      "The HTML source does not contain a usable title or h1 heading.",
+    );
+  }
+
+  let digest: string | undefined;
+  let removedPublishConfigCount = 0;
+  source("[data-publish-config], .editor, section, div").each((_, element) => {
+    const node = source(element);
+    const heading = node.children("h1,h2,h3").first().text().replace(/\s+/g, "").trim();
+    const isPublishConfig =
+      node.is("[data-publish-config]") ||
+      (node.hasClass("editor") && heading === "发布配置") ||
+      heading === "发布配置";
+    if (!isPublishConfig) return;
+
+    if (!digest) {
+      node.find("p").each((__, paragraph) => {
+        if (digest) return;
+        const text = source(paragraph).text().replace(/\s+/g, " ").trim();
+        const match = text.match(/^摘要[：:]\s*(.+)$/);
+        if (match?.[1]) digest = match[1].trim();
+      });
+    }
+    removedPublishConfigCount += 1;
+    node.remove();
+  });
+
+  const inlinedHtml = juice(source.html(), {
+    applyStyleTags: true,
+    removeStyleTags: true,
+    preserveMediaQueries: false,
+  });
+  const prepared = load(inlinedHtml);
+
+  let removedLinkCount = 0;
+  prepared("a").each((_, element) => {
+    const link = prepared(element);
+    const replacement = prepared("<span></span>");
+    const style = link.attr("style");
+    const className = link.attr("class");
+    if (style) replacement.attr("style", style);
+    if (className) replacement.attr("class", className);
+    for (const [name, value] of Object.entries(element.attribs ?? {})) {
+      if (name.startsWith("data-") && value) replacement.attr(name, value);
+    }
+    replacement.append(link.contents());
+    link.replaceWith(replacement);
+    removedLinkCount += 1;
+  });
+
+  const root = prepared("article").first().length
+    ? prepared("article").first()
+    : prepared("body").first();
+
+  const removedTitleCount = root.find("h1").first().length;
+  root.find("h1").first().remove();
+
+  const layoutProperties = new Set([
+    "margin",
+    "margin-left",
+    "margin-right",
+    "padding",
+    "padding-left",
+    "padding-right",
+    "width",
+    "min-width",
+    "max-width",
+  ]);
+  const bodyOnlyProperties = new Set([...layoutProperties, "background", "background-color"]);
+  const filterStyles = (style: string | undefined, blocked: Set<string>) =>
+    (style ?? "")
+      .split(";")
+      .map((declaration) => declaration.trim())
+      .filter(Boolean)
+      .filter((declaration) => {
+        const property = declaration.split(":", 1)[0]?.trim().toLowerCase() ?? "";
+        return !blocked.has(property);
+      });
+  const rootStyles = filterStyles(root.attr("style"), layoutProperties);
+  const bodyStyles = filterStyles(prepared("body").first().attr("style"), bodyOnlyProperties);
+  const combinedRootStyle = [...rootStyles, ...bodyStyles].join("; ");
+  if (combinedRootStyle) root.attr("style", `${combinedRootStyle};`);
+  else root.removeAttr("style");
+
+  // WeChat's editor inconsistently preserves borders, padding, and rounded corners on divs.
+  // Normalize simple bordered callouts to the same paragraph-based style that survives a
+  // browser rich-text paste. Keep their content, classes, and data attributes intact.
+  const borderedProperties = new Set([
+    "border",
+    "border-top",
+    "border-right",
+    "border-bottom",
+    "border-left",
+  ]);
+  const compatibleCalloutStyle = [
+    "margin: 0 0 18px",
+    "padding: 18px 20px",
+    "border-radius: 10px",
+    "background: #edf6ff",
+    "color: #244a70",
+  ].join("; ");
+  let normalizedBorderedCalloutCount = 0;
+  root.find("div,p,aside,blockquote").each((_, element) => {
+    const callout = prepared(element);
+    const declarations = (callout.attr("style") ?? "")
+      .split(";")
+      .map((declaration) => declaration.trim())
+      .filter(Boolean);
+    const hasExplicitBorder = declarations.some((declaration) => {
+      const property = declaration.split(":", 1)[0]?.trim().toLowerCase() ?? "";
+      return borderedProperties.has(property);
+    });
+    const hasNestedBlock = callout
+      .children("article,aside,blockquote,div,h1,h2,h3,h4,h5,h6,ol,p,section,table,ul")
+      .length > 0;
+    if (!hasExplicitBorder || hasNestedBlock) return;
+
+    const replacement = prepared("<p></p>");
+    for (const [name, value] of Object.entries(element.attribs ?? {})) {
+      if (name !== "style" && value) replacement.attr(name, value);
+    }
+    replacement.attr("style", `${compatibleCalloutStyle};`);
+    replacement.append(callout.contents());
+    callout.replaceWith(replacement);
+    normalizedBorderedCalloutCount += 1;
+  });
+
+  let compactedListCount = 0;
+  let removedEmptyListItemCount = 0;
+  const listItemMarginProperties = new Set([
+    "margin",
+    "margin-top",
+    "margin-bottom",
+  ]);
+  root.find("ul,ol").each((_, element) => {
+    const list = prepared(element);
+    list.children("li").each((__, itemElement) => {
+      const item = prepared(itemElement);
+      const hasVisibleContent =
+        item.text().replace(/\u00a0/g, " ").trim().length > 0 ||
+        item.find("img,video,audio").length > 0;
+      if (!hasVisibleContent) {
+        item.remove();
+        removedEmptyListItemCount += 1;
+        return;
+      }
+      const itemStyles = filterStyles(item.attr("style"), listItemMarginProperties);
+      itemStyles.push("margin: 0");
+      item.attr("style", `${itemStyles.join("; ")};`);
+    });
+    const compactItems = list
+      .children("li")
+      .toArray()
+      .map((item) => prepared.html(item))
+      .join("");
+    list.html(compactItems);
+    compactedListCount += 1;
+  });
+
+  const contentHtml = root.prop("outerHTML")?.trim() ?? "";
+  if (!contentHtml) {
+    throw new WechatMcpError(
+      "VALIDATION_ERROR",
+      "The HTML source does not contain a usable article or body.",
+    );
+  }
+
+  return {
+    title,
+    ...(digest ? { digest } : {}),
+    content_html: contentHtml,
+    source_filename: sourceFilename,
+    removed_link_count: removedLinkCount,
+    removed_publish_config_count: removedPublishConfigCount,
+    removed_title_count: removedTitleCount,
+    compacted_list_count: compactedListCount,
+    removed_empty_list_item_count: removedEmptyListItemCount,
+    normalized_bordered_callout_count: normalizedBorderedCalloutCount,
+    preserved_ad_count: root.find(".ad").length,
+    inline_style_count: root.find("[style]").length + (root.attr("style") ? 1 : 0),
+  };
+}
 
 function decodeJavascriptString(value: string): string {
   try {
@@ -229,7 +427,25 @@ export function parseReportPage(
   buffer: ArrayBuffer,
   offset: number,
   limit: number,
+  range?: { begin_date: string; end_date: string },
 ): ReportPage {
+  const bytes = new Uint8Array(buffer);
+  if (isOle2(bytes)) {
+    const sheet = parseXlsReport(buffer);
+    if (!sheet) {
+      return { total: 0, count: 0, offset, hasMore: false, columns: [], rows: [] };
+    }
+    const title = sheet.title ?? "";
+    const exportedRange = extractReportRange(title);
+    if (exportedRange && range && (exportedRange.begin !== range.begin_date || exportedRange.end !== range.end_date)) {
+      throw new WechatMcpError(
+        "NO_DATA",
+        `WeChat returned a pre-generated report template for ${exportedRange.begin} to ${exportedRange.end} instead of a real export for ${range.begin_date} to ${range.end_date}. The backend generates the export asynchronously; no usable data is available.`,
+      );
+    }
+    return xlsSheetToReportPage(sheet, offset, limit, title);
+  }
+
   const text = decodeReport(buffer).trim();
   if (!text) {
     return { total: 0, count: 0, offset, hasMore: false, columns: [], rows: [] };
@@ -260,6 +476,48 @@ export function parseReportPage(
     columns,
     rows,
   };
+}
+
+function xlsSheetToReportPage(
+  sheet: XlsSheet,
+  offset: number,
+  limit: number,
+  title: string,
+): ReportPage {
+  // Row 0 is the title; row 1 holds the column headers.
+  const headerRow = sheet.rows[1] ?? [];
+  const columns = headerRow
+    .map((value, index) => ({ value, index }))
+    .filter(({ value }) => typeof value === "string" && value.length > 0)
+    .map(({ value }) => value as string);
+  if (!columns.length) {
+    return { total: 0, count: 0, offset, hasMore: false, columns: [], rows: [], title };
+  }
+  const rows = sheet.rows.slice(2).map((values) => {
+    const record: Record<string, string> = {};
+    columns.forEach((column, index) => {
+      const value = values[index];
+      record[column] = value === null || value === undefined ? "" : formatReportValue(value);
+    });
+    return record;
+  });
+  const pageRows = rows.slice(offset, offset + limit);
+  const hasMore = rows.length > offset + pageRows.length;
+  return {
+    total: rows.length,
+    count: pageRows.length,
+    offset,
+    hasMore,
+    ...(hasMore ? { nextOffset: offset + pageRows.length } : {}),
+    columns,
+    rows: pageRows,
+    title,
+  };
+}
+
+function formatReportValue(value: string | number): string {
+  if (typeof value === "number") return String(value);
+  return value;
 }
 
 export function parsePublicArticle(html: string, maxCharacters: number) {
