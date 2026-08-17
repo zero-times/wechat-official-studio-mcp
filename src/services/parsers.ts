@@ -89,8 +89,11 @@ export function prepareDraftHtmlDocument(
     ? prepared("article").first()
     : prepared("body").first();
 
-  const removedTitleCount = root.find("h1").first().length;
-  root.find("h1").first().remove();
+  // The article body must never include the title: the editor fills the title separately,
+  // and pasted content that repeats the h1 renders a duplicated heading. Remove every h1
+  // inside the article body (the title was already captured above).
+  const removedTitleCount = root.find("h1").length;
+  root.find("h1").remove();
 
   const layoutProperties = new Set([
     "margin",

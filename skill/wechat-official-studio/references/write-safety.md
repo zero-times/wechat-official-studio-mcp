@@ -17,7 +17,7 @@ Before setting `confirm=true`, show the user:
 - each upload basename and intended usage;
 - cover assignment, source URL, cover-display flag, and comment settings;
 - all validator warnings.
-- for direct HTML imports: source basename, inline-style count, removed-link count, removed duplicate-title count, compacted-list count, removed-empty-list-item count, normalized-bordered-callout count, removed publish-config count, and preserved ad-block count.
+- for direct HTML imports: source basename, inline-style count, removed-link count, removed-all-title count, compacted-list count, removed-empty-list-item count, normalized-bordered-callout count, removed publish-config count, preserved ad-block count, and (when a batch script is used) removed placeholder-block count for `.ad`/`.cps`; the body must never start with the article title.
 
 Require explicit approval of this preview. If any title, content, file, setting, or account changes after approval, show the changed preview and confirm again.
 

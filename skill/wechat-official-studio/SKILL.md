@@ -30,13 +30,39 @@ For analytics conclusions, treat only records from the current calendar year as 
 
 Public article HTML provides readable content and metadata, not authoritative operator metrics. For reads, shares, likes, comments, or follower data, use the authenticated report tools. If both anonymous and authenticated public-article attempts reach `PUBLIC_ARTICLE_CHALLENGE`, ask the user to open that URL in their own browser and complete WeChat's environment verification. Do not retry again automatically and do not claim that the backend Cookie is expired unless `wechat_official_check_auth` also fails.
 
+## Article body generation rules
+
+Apply these rules every time article content is prepared for a draft; they exist so pasted
+content does not reproduce known formatting problems:
+
+1. **The body never includes the title.** The editor fills the title in a separate field;
+   a body that starts with the `h1` renders a duplicated heading. Always pass the original
+   `.html` file through `source_html_path` (or the equivalent `prepareDraftHtmlDocument`
+   preparation) — it captures the title and removes **all** body `h1` elements.
+2. **Build the body as if it were copied from the HTML and pasted into the editor.** Never
+   hand-assemble a `content_html` fragment from the source file. Use the import path so the
+   MCP inlines the document CSS (rich-text paste behaviour), removes links (keeping
+   `data-miniprogram-*` attributes so `weapp_text_link` entries still open the mini program),
+   and keeps `mp-common-miniprogram` cards intact.
+3. **Source HTML styling must use plain rounded backgrounds, not bordered blocks.** WeChat's
+   editor inconsistently preserves borders on `div`/`p`. Style callouts as pure
+   `background` + `border-radius` without any `border` declaration. The import normalizes any
+   remaining simple bordered block to a compatible plain blue rounded paragraph as a
+   fallback, but the source should not rely on it.
+4. **Lists must not produce blank `<li>` lines.** Write one `<li>` per line with no empty
+   lines between items, never emit empty `<li>` elements, and do not style `li` with
+   `margin-top`/`margin-bottom` (the import zeroes item margins and compacts list whitespace).
+5. **Local publishing placeholders never enter the draft body.** Remove `.ad` (in-article ad
+   slot) and `.cps` (commission product slot) placeholder blocks before saving; the platform
+   or a human inserts those later.
+
 ## Upload images and save drafts
 
 Read [references/write-safety.md](references/write-safety.md) before the first write in a task.
 
 1. Confirm authentication and the intended account.
 2. Call `wechat_official_validate_draft` with the complete article payload. Resolve validation errors and surface warnings.
-   When an approved original `.html`/`.htm` file exists, pass it as `source_html_path` instead of reconstructing `content_html`. The MCP inlines document CSS to match rich-text browser copy, removes the duplicate body `h1` and outer layout width/margins, compacts list whitespace while retaining real bullets, normalizes simple bordered blocks to the compatible blue rounded paragraph-callout style, converts links to styled non-link text, removes the publish-configuration section, and preserves body ad copy and other article content.
+   When an approved original `.html`/`.htm` file exists, pass it as `source_html_path` instead of reconstructing `content_html`. The MCP inlines document CSS to match rich-text browser copy, removes **all** body `h1` elements (the title is a separate field), removes outer layout width/margins, compacts list whitespace and empty `<li>` lines while retaining real bullets, normalizes simple bordered blocks to the compatible blue rounded paragraph-callout style, converts links to styled non-link text (keeping `data-miniprogram-*` attributes), removes the publish-configuration section, and preserves body ad copy and other article content. Follow the rules in "Article body generation rules" above.
 3. Show a concise preview: account, titles, content lengths, cover filenames, comment settings, source URLs, validation warnings, and HTML import counts for inline styles, removed links, normalized bordered callouts, removed publish-config sections, and preserved ad blocks. Do not expose absolute local paths.
 4. Obtain explicit user approval for that preview. A request to “help write an article” is not approval to write the account; approval must name or clearly refer to saving the reviewed content to the draft box.
 5. Call `wechat_official_upload_image` only for approved files inside configured upload roots, with `confirm=true`. Use `usage=material` for covers/material-library images and `usage=article` for body-image URLs.
