@@ -55,6 +55,17 @@ content does not reproduce known formatting problems:
 5. **Local publishing placeholders never enter the draft body.** Remove `.ad` (in-article ad
    slot) and `.cps` (commission product slot) placeholder blocks before saving; the platform
    or a human inserts those later.
+6. **Mini-program entries are copied from the fixed template draft, never hand-written.**
+   The `weapp_text_link` in-article entry and the `mp-common-miniprogram` end card must be
+   copy-pasted from the account's template draft **appmsgid=100001069** (draft box, titled
+   "测试"; editor page:
+   `https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit&action=edit&type=77&appmsgid=100001069&isMul=1&replaceScene=0&isSend=0&isFreePublish=0&lang=zh_CN`,
+   session `token` taken from the current logged-in session, never committed). That draft
+   provides 4 cards (`pages/timeline/index`, `pages/material/index`, `pages/checklist/index`,
+   `pages/redact/index`) and 5 text links (same four plus `pages/index/index`). Copy the
+   matching page's element verbatim — do not invent `data-miniprogram-*` attributes, appid
+   `wx5c7262a5d15521d7`, nicknames, or card images. If the template draft is missing,
+   stop and ask the user to restore it before writing the draft.
 
 ## Upload images and save drafts
 
