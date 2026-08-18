@@ -52,9 +52,11 @@ content does not reproduce known formatting problems:
 4. **Lists must not produce blank `<li>` lines.** Write one `<li>` per line with no empty
    lines between items, never emit empty `<li>` elements, and do not style `li` with
    `margin-top`/`margin-bottom` (the import zeroes item margins and compacts list whitespace).
-5. **Local publishing placeholders never enter the draft body.** Remove `.ad` (in-article ad
-   slot) and `.cps` (commission product slot) placeholder blocks before saving; the platform
-   or a human inserts those later.
+5. **Local publishing placeholders follow the batch instruction.** The `.ad` (in-article ad
+   slot) and `.cps` (commission product slot) placeholder blocks are by default kept in the
+   draft body so a human can verify and replace them in the backend before publishing
+   (replace the ad line with the real ad slot, insert the product card over the `.cps`
+   block). Only remove them before saving when the batch explicitly says so.
 6. **Mini-program entries are copied from the fixed template draft, never hand-written.**
    The `weapp_text_link` in-article entry and the `mp-common-miniprogram` end card must be
    copy-pasted from the account's template draft **appmsgid=100001069** (draft box, titled
