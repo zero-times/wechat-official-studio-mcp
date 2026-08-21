@@ -44,6 +44,33 @@ export function buildMaterialUploadQuery(
   };
 }
 
+export function buildLegacyMaterialUploadQuery(
+  context: { user_name: string; ticket: string; svr_time: string | number },
+): Record<string, string> {
+  return {
+    action: "upload_material",
+    f: "json",
+    ticket_id: context.user_name,
+    ticket: context.ticket,
+    svr_time: String(context.svr_time),
+  };
+}
+
+export function extractMaterialGroupIds(html: string): number[] {
+  const ids = new Set<number>();
+  const patterns = [
+    /["']?(?:group_id|groupid|groupId)["']?\s*[:=]\s*["']?(\d+)/g,
+    /[?&](?:group_id|groupid)=(\d+)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of html.matchAll(pattern)) {
+      const id = Number(match[1]);
+      if (Number.isSafeInteger(id) && id >= 0 && id <= 100_000) ids.add(id);
+    }
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
 const AUTH_TEXT_PATTERN =
   /(请重新登录|登录超时|登录失效|微信扫码登录|login\s*(expired|required)|invalid\s*(session|token))/i;
 const PUBLIC_ARTICLE_CHALLENGE_PATTERN =

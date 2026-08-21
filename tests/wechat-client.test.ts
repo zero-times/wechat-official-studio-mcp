@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { errorPayload, WechatMcpError } from "../src/services/errors.js";
-import { buildMaterialUploadQuery, WechatClient } from "../src/services/wechat-client.js";
+import {
+  buildLegacyMaterialUploadQuery,
+  buildMaterialUploadQuery,
+  extractMaterialGroupIds,
+  WechatClient,
+} from "../src/services/wechat-client.js";
 import { READ_ONLY_BACKEND_PATHS, WRITE_GET_PATHS, WRITE_POST_PATHS } from "../src/constants.js";
 
 test("accepts modern /s/article-id public URLs without sending a cookie", async () => {
@@ -225,6 +230,28 @@ test("material upload query opts into the current double-write library", () => {
       writetype: "doublewrite",
       groupid: "103",
     },
+  );
+});
+
+test("legacy material upload query omits current-library routing fields", () => {
+  assert.deepEqual(
+    buildLegacyMaterialUploadQuery({ user_name: "account", ticket: "ticket", svr_time: 42 }),
+    {
+      action: "upload_material",
+      f: "json",
+      ticket_id: "account",
+      ticket: "ticket",
+      svr_time: "42",
+    },
+  );
+});
+
+test("extracts only bounded material group IDs from library HTML", () => {
+  assert.deepEqual(
+    extractMaterialGroupIds(
+      `<script>window.groups=[{"group_id":103},{"groupid":"7"}]</script><a href="?group_id=18">x</a>`,
+    ),
+    [7, 18, 103],
   );
 });
 

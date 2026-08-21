@@ -28,7 +28,12 @@ import {
   prepareDraftHtmlDocument,
 } from "./services/parsers.js";
 import { validateHtmlSourceFile, validateImageFile } from "./services/config.js";
-import { buildMaterialUploadQuery, WechatClient } from "./services/wechat-client.js";
+import {
+  buildLegacyMaterialUploadQuery,
+  buildMaterialUploadQuery,
+  extractMaterialGroupIds,
+  WechatClient,
+} from "./services/wechat-client.js";
 import type { DraftArticle } from "./types.js";
 
 const client = new WechatClient();
@@ -586,7 +591,39 @@ server.registerTool(
   },
 );
 
-// ── Image upload tool ──
+// ── Material diagnostics and image upload tools ──
+
+server.registerTool(
+  "wechat_official_list_material_groups",
+  {
+    title: "List WeChat material group IDs",
+    description:
+      "Read the logged-in account's material-library page and return only detected numeric group IDs. Does not expose page HTML or authentication fields and does not modify WeChat.",
+    inputSchema: z
+      .object({ response_format: z.enum(["markdown", "json"]).default("markdown") })
+      .strict(),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async ({ response_format }) => {
+    try {
+      await client.verifyAuthentication();
+      const materialHtml = await client.getMaterialPage(0);
+      const groupIds = extractMaterialGroupIds(materialHtml);
+      return formatResult(
+        { ok: true, group_ids: groupIds },
+        ["# Material groups", "", `- Group IDs: ${groupIds.length ? groupIds.join(", ") : "none detected"}`].join("\n"),
+        response_format,
+      );
+    } catch (error) {
+      return toolError(error);
+    }
+  },
+);
 
 server.registerTool(
   "wechat_official_upload_image",
@@ -647,26 +684,31 @@ server.registerTool(
           validated.mime,
         );
       } else {
-        const materialGroupId = group_id ?? 0;
-        const materialHtml = await client.getMaterialPage(materialGroupId);
-        const context = parseEditorContext(materialHtml);
+        const usesCurrentMaterialLibrary = group_id !== undefined;
+        const contextHtml = usesCurrentMaterialLibrary
+          ? await client.getMaterialPage(group_id)
+          : await client.getEditorPage();
+        const context = parseEditorContext(contextHtml);
         if (!context.ticket || !context.user_name || !context.svr_time) {
           throw new WechatMcpError(
             "UPSTREAM_CHANGED",
-            "The WeChat material library no longer exposes the fields required for material upload.",
+            usesCurrentMaterialLibrary
+              ? "The WeChat material library no longer exposes the fields required for material upload."
+              : "The WeChat editor no longer exposes the fields required for legacy material upload.",
           );
         }
 
+        const uploadContext = {
+          user_name: context.user_name,
+          ticket: context.ticket,
+          svr_time: context.svr_time,
+        };
+
         result = await client.postMultipart(
           "/cgi-bin/filetransfer",
-          buildMaterialUploadQuery(
-            {
-              user_name: context.user_name,
-              ticket: context.ticket,
-              svr_time: context.svr_time,
-            },
-            materialGroupId,
-          ),
+          usesCurrentMaterialLibrary
+            ? buildMaterialUploadQuery(uploadContext, group_id)
+            : buildLegacyMaterialUploadQuery(uploadContext),
           {},
           "file",
           validated.filename,
