@@ -470,6 +470,17 @@ test("parses successful root-level ret response", () => {
   assert.equal(result.data.msgid, "msg456");
 });
 
+test("parses current article-image errcode response", () => {
+  const result = parseWriteResponse({
+    errcode: 0,
+    file_id: "image-file-id",
+    url: "http://mmbiz.qpic.cn/example/0?wx_fmt=jpeg",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.data.file_id, "image-file-id");
+  assert.equal(result.data.url, "https://mmbiz.qpic.cn/example/0?wx_fmt=jpeg");
+});
+
 test("parses JSON nested in content field", () => {
   const result = parseWriteResponse({
     base_resp: { ret: 0 },
@@ -477,6 +488,36 @@ test("parses JSON nested in content field", () => {
   });
   assert.equal(result.ok, true);
   assert.equal(result.data.nested_appmsgid, "nested789");
+});
+
+test("normalizes protocol-relative WeChat CDN URLs and strips session query fields", () => {
+  const result = parseWriteResponse({
+    base_resp: { ret: 0 },
+    cdn_url: "//mmbiz.qpic.cn/example/0?wx_fmt=png&token=secret&ticket=secret",
+  });
+  assert.equal(
+    result.data.cdn_url,
+    "https://mmbiz.qpic.cn/example/0?wx_fmt=png",
+  );
+});
+
+test("finds aliased HTTP WeChat image URLs in safe nested containers", () => {
+  const result = parseWriteResponse({
+    base_resp: { ret: 0 },
+    data: { image_url: "http://mmbiz.qpic.cn/example/0?wx_fmt=jpeg" },
+  });
+  assert.equal(
+    result.data.nested_cdn_url,
+    "https://mmbiz.qpic.cn/example/0?wx_fmt=jpeg",
+  );
+});
+
+test("does not upgrade or return non-WeChat HTTP image URLs", () => {
+  const result = parseWriteResponse({
+    base_resp: { ret: 0 },
+    data: { image_url: "http://example.com/image.png" },
+  });
+  assert.equal(result.data.nested_cdn_url, undefined);
 });
 
 test("throws on nested content error", () => {

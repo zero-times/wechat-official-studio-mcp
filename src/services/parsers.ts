@@ -635,8 +635,9 @@ export function parseEditorContext(html: string): EditorContext {
 const FORBIDDEN_TAGS = ["script", "iframe", "object", "embed", "form"] as const;
 
 function isWechatImageHost(hostname: string): boolean {
-  return ["qpic.cn", "weixin.qq.com", "wechat.com", "wx.qq.com"].some(
-    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+  const host = hostname.toLowerCase();
+  return ["qpic.cn", "qpic.com", "qlogo.cn", "qq.com", "weixin.qq.com", "wechat.com"].some(
+    (suffix) => host === suffix || host.endsWith(`.${suffix}`),
   );
 }
 
@@ -893,6 +894,32 @@ export type ParsedWriteResponse = {
   data: Record<string, unknown>;
 };
 
+const SENSITIVE_URL_QUERY_KEY =
+  /^(?:access_token|auth|session|session_id|sessionid|ticket|ticket_id|token|user_name)$/i;
+
+function sanitizeWriteUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value.trim() || value.length > 2_048) return undefined;
+  let candidate = value.trim().replace(/&amp;/g, "&");
+  if (candidate.startsWith("//")) candidate = `https:${candidate}`;
+
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return undefined;
+  }
+
+  if (url.protocol === "http:" && isWechatImageHost(url.hostname)) {
+    url.protocol = "https:";
+  }
+  if (url.protocol !== "https:") return undefined;
+
+  for (const key of [...url.searchParams.keys()]) {
+    if (SENSITIVE_URL_QUERY_KEY.test(key)) url.searchParams.delete(key);
+  }
+  return url.toString();
+}
+
 /**
  * Parse write-endpoint responses (upload, draft save).
  * Handles base_resp, nested JSON in content, and unexpected shapes.
@@ -904,8 +931,8 @@ export function parseWriteResponse(payload: unknown): ParsedWriteResponse {
 
   if (ret === 0) {
     const data: Record<string, unknown> = {};
-    const idKeys = ["msgid", "appmsgid", "media_id", "fileid"];
-    const urlKeys = ["url", "cdn_url"];
+    const idKeys = ["msgid", "appmsgid", "media_id", "fileid", "file_id"];
+    const urlKeys = ["url", "cdn_url", "cdnurl", "cdnUrl", "img_url", "image_url", "file_url"];
     const copySafeScalars = (source: Record<string, unknown>, prefix = "") => {
       for (const key of idKeys) {
         const value = source[key];
@@ -917,43 +944,48 @@ export function parseWriteResponse(payload: unknown): ParsedWriteResponse {
         }
       }
       for (const key of urlKeys) {
-        const value = source[key];
-        if (typeof value !== "string" || value.length > 2_048) continue;
-        try {
-          const url = new URL(value);
-          if (url.protocol === "https:") data[`${prefix}${key}`] = value;
-        } catch {
-          // Ignore non-URL upstream fields rather than echoing them.
-        }
+        const safeUrl = sanitizeWriteUrl(source[key]);
+        if (!safeUrl) continue;
+        const canonicalKey = key === "url" ? `${prefix}url` : `${prefix}cdn_url`;
+        if (!data[canonicalKey]) data[canonicalKey] = safeUrl;
       }
     };
     copySafeScalars(root);
 
+    const copySafeNestedContainers = (source: Record<string, unknown>, depth = 0) => {
+      if (depth > 2) return;
+      for (const key of ["data", "result", "file", "image", "img"]) {
+        const nested = parseNestedJson(source[key]);
+        if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+        const nestedRecord = asRecord(nested);
+        copySafeScalars(nestedRecord, "nested_");
+        copySafeNestedContainers(nestedRecord, depth + 1);
+      }
+    };
+    copySafeNestedContainers(root);
+
     const content = root.content;
-    if (typeof content === "string") {
-      const nested = parseNestedJson(content);
-      if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) {
-        const nestedObj = asRecord(nested);
-        const nestedRet = Number(nestedObj.ret ?? 0);
-        if (nestedRet === 0) {
-          copySafeScalars(nestedObj, "nested_");
-        } else {
-          throw new WechatMcpError(
-            "UPSTREAM_ERROR",
-            `WeChat returned a nested error for the write operation (ret=${nestedRet}).`,
-            false,
-            { ret: nestedRet },
-          );
-        }
-      } else if (/^[A-Za-z0-9_+\/=.-]{1,512}$/.test(content.trim())) {
+    const nested = parseNestedJson(content);
+    if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) {
+      const nestedObj = asRecord(nested);
+      const nestedRet = Number(nestedObj.ret ?? 0);
+      if (nestedRet === 0) {
+        copySafeScalars(nestedObj, "nested_");
+        copySafeNestedContainers(nestedObj);
+      } else {
+        throw new WechatMcpError(
+          "UPSTREAM_ERROR",
+          `WeChat returned a nested error for the write operation (ret=${nestedRet}).`,
+          false,
+          { ret: nestedRet },
+        );
+      }
+    } else if (typeof content === "string") {
+      if (/^[A-Za-z0-9_+\/=.-]{1,512}$/.test(content.trim())) {
         data.fileid = content.trim();
       } else {
-        try {
-          const url = new URL(content.trim());
-          if (url.protocol === "https:") data.url = url.toString();
-        } catch {
-          // Never return an unrecognized raw content field.
-        }
+        const safeUrl = sanitizeWriteUrl(content);
+        if (safeUrl) data.url = safeUrl;
       }
     }
 

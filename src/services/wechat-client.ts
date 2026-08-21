@@ -29,6 +29,21 @@ export type PublicArticleResponse = {
   accessMode: "anonymous" | "authenticated";
 };
 
+export function buildMaterialUploadQuery(
+  context: { user_name: string; ticket: string; svr_time: string | number },
+  groupId: number,
+): Record<string, string> {
+  return {
+    action: "upload_material",
+    f: "json",
+    ticket_id: context.user_name,
+    ticket: context.ticket,
+    svr_time: String(context.svr_time),
+    writetype: "doublewrite",
+    groupid: String(groupId),
+  };
+}
+
 const AUTH_TEXT_PATTERN =
   /(请重新登录|登录超时|登录失效|微信扫码登录|login\s*(expired|required)|invalid\s*(session|token))/i;
 const PUBLIC_ARTICLE_CHALLENGE_PATTERN =
@@ -415,6 +430,39 @@ export class WechatClient {
     const text = await response.text();
     this.detectAuthFailure(text);
     return text;
+  }
+
+  /** Fetch the material-library page for upload context and post-write verification. */
+  async getMaterialPage(groupId = 0, count = 50, begin = 0): Promise<string> {
+    return this.getText("/cgi-bin/filepage", {
+      type: 2,
+      count,
+      begin,
+      group_id: groupId,
+      view: 1,
+    });
+  }
+
+  /** Verify a material image through the same JSON listing used by the current web library. */
+  async hasMaterialImage(groupId: number, mediaId: string, filename: string): Promise<boolean> {
+    const payload = await this.getJson("/cgi-bin/filepage", {
+      type: 2,
+      count: 50,
+      begin: 0,
+      group_id: groupId,
+      f: "json",
+      ajax: 1,
+    });
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+    const pageInfo = (payload as Record<string, unknown>).page_info;
+    if (!pageInfo || typeof pageInfo !== "object" || Array.isArray(pageInfo)) return false;
+    const items = (pageInfo as Record<string, unknown>).file_item;
+    if (!Array.isArray(items)) return false;
+    return items.some((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const record = item as Record<string, unknown>;
+      return String(record.file_id ?? "") === mediaId || record.name === filename;
+    });
   }
 
   /** POST multipart form data (for image uploads). Returns parsed JSON. */

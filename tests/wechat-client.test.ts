@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { errorPayload, WechatMcpError } from "../src/services/errors.js";
-import { WechatClient } from "../src/services/wechat-client.js";
+import { buildMaterialUploadQuery, WechatClient } from "../src/services/wechat-client.js";
 import { READ_ONLY_BACKEND_PATHS, WRITE_GET_PATHS, WRITE_POST_PATHS } from "../src/constants.js";
 
 test("accepts modern /s/article-id public URLs without sending a cookie", async () => {
@@ -177,6 +177,74 @@ test("authentication preflight makes a real request even when a token is configu
 
     await client.verifyAuthentication();
     assert.deepEqual(requestedPaths, ["/cgi-bin/home"]);
+  } finally {
+    if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
+    else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;
+    if (previousToken === undefined) delete process.env.WECHAT_OFFICIAL_TOKEN;
+    else process.env.WECHAT_OFFICIAL_TOKEN = previousToken;
+  }
+});
+
+test("material page reads use the current token and requested material group", async () => {
+  const previousCookie = process.env.WECHAT_OFFICIAL_COOKIE;
+  const previousToken = process.env.WECHAT_OFFICIAL_TOKEN;
+  process.env.WECHAT_OFFICIAL_COOKIE = `session=${"x".repeat(32)}`;
+  process.env.WECHAT_OFFICIAL_TOKEN = "987654";
+  let requestedUrl: URL | undefined;
+  try {
+    const client = new WechatClient((async (input) => {
+      requestedUrl = new URL(String(input));
+      return new Response("<html>material page</html>", { status: 200 });
+    }) as typeof fetch);
+
+    await client.getMaterialPage(103, 50, 0);
+    assert.equal(requestedUrl?.pathname, "/cgi-bin/filepage");
+    assert.equal(requestedUrl?.searchParams.get("group_id"), "103");
+    assert.equal(requestedUrl?.searchParams.get("token"), "987654");
+    assert.equal(requestedUrl?.searchParams.get("type"), "2");
+  } finally {
+    if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
+    else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;
+    if (previousToken === undefined) delete process.env.WECHAT_OFFICIAL_TOKEN;
+    else process.env.WECHAT_OFFICIAL_TOKEN = previousToken;
+  }
+});
+
+test("material upload query opts into the current double-write library", () => {
+  assert.deepEqual(
+    buildMaterialUploadQuery(
+      { user_name: "account", ticket: "ticket", svr_time: 42 },
+      103,
+    ),
+    {
+      action: "upload_material",
+      f: "json",
+      ticket_id: "account",
+      ticket: "ticket",
+      svr_time: "42",
+      writetype: "doublewrite",
+      groupid: "103",
+    },
+  );
+});
+
+test("material verification reads the current JSON file list", async () => {
+  const previousCookie = process.env.WECHAT_OFFICIAL_COOKIE;
+  const previousToken = process.env.WECHAT_OFFICIAL_TOKEN;
+  process.env.WECHAT_OFFICIAL_COOKIE = `session=${"x".repeat(32)}`;
+  process.env.WECHAT_OFFICIAL_TOKEN = "987654";
+  try {
+    const client = new WechatClient((async () =>
+      new Response(
+        JSON.stringify({
+          base_resp: { ret: 0 },
+          page_info: { file_item: [{ file_id: 65, name: "cover.png" }] },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch);
+    assert.equal(await client.hasMaterialImage(103, "65", "other.png"), true);
+    assert.equal(await client.hasMaterialImage(103, "99", "cover.png"), true);
+    assert.equal(await client.hasMaterialImage(103, "99", "missing.png"), false);
   } finally {
     if (previousCookie === undefined) delete process.env.WECHAT_OFFICIAL_COOKIE;
     else process.env.WECHAT_OFFICIAL_COOKIE = previousCookie;

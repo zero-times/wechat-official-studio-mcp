@@ -28,7 +28,7 @@ import {
   prepareDraftHtmlDocument,
 } from "./services/parsers.js";
 import { validateHtmlSourceFile, validateImageFile } from "./services/config.js";
-import { WechatClient } from "./services/wechat-client.js";
+import { buildMaterialUploadQuery, WechatClient } from "./services/wechat-client.js";
 import type { DraftArticle } from "./types.js";
 
 const client = new WechatClient();
@@ -601,6 +601,13 @@ server.registerTool(
           .enum(["material", "article"])
           .default("material")
           .describe("Upload as material (cover/library) or article (inline body image)"),
+        group_id: z
+          .number()
+          .int()
+          .min(0)
+          .max(100_000)
+          .optional()
+          .describe("Optional material-library group ID; used only with usage=material"),
         confirm: z
           .boolean()
           .describe("Must be set to true to proceed with the upload."),
@@ -614,7 +621,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  async ({ file_path, usage, confirm, response_format }) => {
+  async ({ file_path, usage, group_id, confirm, response_format }) => {
     try {
       if (!confirm) return confirmError("wechat_official_upload_image");
 
@@ -627,31 +634,39 @@ server.registerTool(
         result = await client.postMultipart(
           "/cgi-bin/uploadimg2cdn",
           { t: "ajax-editor-upload-img" },
-          {},
-          "img",
+          {
+            id: validated.filename,
+            name: validated.filename,
+            type: validated.mime,
+            lastModifiedDate: new Date().toString(),
+            size: String(validated.size),
+          },
+          "upfile",
           validated.filename,
           validated.buffer,
           validated.mime,
         );
       } else {
-        const editorHtml = await client.getEditorPage();
-        const context = parseEditorContext(editorHtml);
+        const materialGroupId = group_id ?? 0;
+        const materialHtml = await client.getMaterialPage(materialGroupId);
+        const context = parseEditorContext(materialHtml);
         if (!context.ticket || !context.user_name || !context.svr_time) {
           throw new WechatMcpError(
             "UPSTREAM_CHANGED",
-            "The WeChat editor no longer exposes the fields required for material upload.",
+            "The WeChat material library no longer exposes the fields required for material upload.",
           );
         }
 
         result = await client.postMultipart(
           "/cgi-bin/filetransfer",
-          {
-            action: "upload_material",
-            f: "json",
-            ticket_id: context.user_name,
-            ticket: context.ticket,
-            svr_time: String(context.svr_time),
-          },
+          buildMaterialUploadQuery(
+            {
+              user_name: context.user_name,
+              ticket: context.ticket,
+              svr_time: context.svr_time,
+            },
+            materialGroupId,
+          ),
           {},
           "file",
           validated.filename,
@@ -664,8 +679,10 @@ server.registerTool(
       const mediaId =
         parsed.data.media_id ??
         parsed.data.fileid ??
+        parsed.data.file_id ??
         parsed.data.nested_media_id ??
-        parsed.data.nested_fileid;
+        parsed.data.nested_fileid ??
+        parsed.data.nested_file_id;
       const cdnUrl =
         parsed.data.cdn_url ??
         parsed.data.url ??
@@ -683,12 +700,30 @@ server.registerTool(
           "The article image upload succeeded but no recognized HTTPS CDN URL was returned.",
         );
       }
+      if (usage === "material" && mediaId) {
+        const materialGroupId = group_id ?? 0;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        const materialVisible = await client.hasMaterialImage(
+          materialGroupId,
+          String(mediaId),
+          validated.filename,
+        );
+        if (!materialVisible) {
+          throw new WechatMcpError(
+            "UPSTREAM_CHANGED",
+            "WeChat returned a material ID, but the uploaded image was not visible in the target material group.",
+            false,
+            { write_result_ambiguous: true, group_id: materialGroupId },
+          );
+        }
+      }
       const safeResult = {
         ok: true,
         filename: validated.filename,
         size: validated.size,
         mime: validated.mime,
         usage,
+        group_id: usage === "material" ? (group_id ?? 0) : undefined,
         media_id: mediaId ? String(mediaId) : undefined,
         cdn_url: cdnUrl ? String(cdnUrl) : undefined,
       };
